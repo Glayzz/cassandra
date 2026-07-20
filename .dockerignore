@@ -1,0 +1,13 @@
+.venv
+__pycache__
+*.pyc
+.env
+.git
+.pytest_cache
+tests
+*.md
+# scratch/temp files (empty placeholders that can't be unlinked in the sandbox)
+_*.py
+_*.html
+cassandra/_*.py
+web/_*.html

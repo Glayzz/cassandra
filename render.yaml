@@ -1,0 +1,20 @@
+# render.yaml - Render.com Blueprint alternative deploy config
+services:
+  - type: web
+    name: cassandra-oracle
+    env: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: DEFAULT_CHAIN_ID
+        value: 1
+      - key: LOG_LEVEL
+        value: info
+      - key: ETHERSCAN_API_KEY
+        sync: false
+      - key: ALCHEMY_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
