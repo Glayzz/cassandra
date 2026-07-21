@@ -237,9 +237,6 @@ async def _rate_limit(request, call_next):
             _RL.clear()
     return await call_next(request)
 
-if _mcp_app is not None:
-    app.mount("/mcp", _mcp_app)
-
 
 # ---- REST facade --------------------------------------------------------------
 
@@ -453,4 +450,14 @@ async def demo():
     if d.exists():
         return HTMLResponse(d.read_text(encoding="utf-8"))
     return HTMLResponse("<h1>Demo page missing</h1>")
+
+
+# ---- MCP mount (MUST be last) -------------------------------------------------
+# mcp.http_app() already routes internally at /mcp, so mounting it at root ("/")
+# serves MCP at exactly /mcp with no doubled segment. A root mount is a catch-all,
+# so it is registered AFTER every FastAPI route above (/, /health, /ready, /demo,
+# /stats, /manifest.json, /foresee/*) to ensure those match first and only
+# unmatched paths (i.e. /mcp) fall through to the MCP app.
+if _mcp_app is not None:
+    app.mount("/", _mcp_app)
 
