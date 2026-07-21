@@ -372,7 +372,7 @@ async def rest_scan(req: ScanReq):
         raise HTTPException(500, str(e))
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
     return {"status": "ok", "service": "cassandra", "version": "0.5.0", "mcp": _MCP_AVAILABLE}
 
