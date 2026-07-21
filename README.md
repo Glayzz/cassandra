@@ -4,7 +4,7 @@
 
 ![status](https://img.shields.io/badge/status-live-1f9d59) ![version](https://img.shields.io/badge/version-0.5.0-5a4be0) ![protocol](https://img.shields.io/badge/A2MCP-agent--native-4536c9) ![chains](https://img.shields.io/badge/EVM%20%2B%20Solana-7%20networks-b0862f) ![license](https://img.shields.io/badge/license-MIT-8a8a95)
 
-> **Live:** https://cassandra-oracle.fly.dev · **MCP:** `/mcp` · **Playground:** `/demo`
+> **Live:** https://cassandra-oracle.onrender.com · **MCP:** `/mcp` · **Playground:** `/demo`
 
 Cassandra is a read-only security oracle for crypto wallets. It inspects the exact things that drain people — the transaction you're about to sign, the approvals you left open, the token you're about to buy, the wallet you're about to trust — and tells you the **consequence** in plain language, priced in USD, with the fix attached.
 
@@ -72,7 +72,7 @@ No keys? It still runs — GoPlus works anonymously and Solana falls back to the
 **As a REST API** — check a token before you buy it:
 
 ```bash
-curl -X POST https://cassandra-oracle.fly.dev/foresee/token \
+curl -X POST https://cassandra-oracle.onrender.com/foresee/token \
   -H 'content-type: application/json' \
   -d '{"chain":"solana","mint":"<mint-address>"}'
 ```
@@ -80,12 +80,12 @@ curl -X POST https://cassandra-oracle.fly.dev/foresee/token \
 **As a REST API** — see what a transaction will do before signing:
 
 ```bash
-curl -X POST https://cassandra-oracle.fly.dev/foresee/signature \
+curl -X POST https://cassandra-oracle.onrender.com/foresee/signature \
   -H 'content-type: application/json' \
   -d '{"chain":"ethereum","to":"0xA0b8…","data":"0x095ea7b3…"}'
 ```
 
-**As an MCP server** — point any A2MCP / MCP-capable agent at `https://cassandra-oracle.fly.dev/mcp`. The five oracles appear as tools (`foresee_scan`, `foresee_signature`, `foresee_approvals`, `foresee_token`, `foresee_identity`) the agent can call on the user's behalf — for example, an agentic wallet that runs `foresee_signature` automatically before every signature.
+**As an MCP server** — point any A2MCP / MCP-capable agent at `https://cassandra-oracle.onrender.com/mcp`. The five oracles appear as tools (`foresee_scan`, `foresee_signature`, `foresee_approvals`, `foresee_token`, `foresee_identity`) the agent can call on the user's behalf — for example, an agentic wallet that runs `foresee_signature` automatically before every signature.
 
 Full request/response shapes for every endpoint are in [docs/API.md](docs/API.md).
 
