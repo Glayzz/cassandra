@@ -1,6 +1,6 @@
 # API Reference
 
-Base URL (live): `https://cassandra-oracle.onrender.com`
+Base URL (live): `https://cassandra-oracle.fly.dev`
 
 Every oracle is available two ways:
 - **REST** — `POST /foresee/<tool>` with a JSON body.
