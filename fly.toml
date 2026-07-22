@@ -16,7 +16,7 @@ primary_region = "iad"  # US East. Pick "hkg" (Hong Kong) for OKX audience per d
 [http_service]
   internal_port = 8000
   force_https = true
-  auto_stop_machines = "suspend"
+  auto_stop_machines = false
   auto_start_machines = true
   min_machines_running = 1  # keep one warm for MCP handshake latency
   processes = ["app"]
