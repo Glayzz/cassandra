@@ -467,7 +467,30 @@ document.querySelectorAll(".ttab").forEach(t=>t.onclick=()=>setTab(t.dataset.tab
 $("runbtn").onclick=()=>RUN[TAB]();
 addEventListener("keydown",e=>{if((e.metaKey||e.ctrlKey)&&e.key==="Enter"){RUN[TAB]&&RUN[TAB]();}});
 
-async function ask(path,body){const r=await fetch(path,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});return r.json();}
+// A dropped connection is not an answer. Retry once - deploys, sleeping
+// machines and flaky mobile links all produce a single transient failure -
+// then explain it in words that tell the reader what to do next.
+class NetworkDown extends Error{}
+async function ask(path,body,attempt=0){
+  const ctrl=new AbortController();
+  const timer=setTimeout(()=>ctrl.abort(),45000);
+  let r;
+  try{
+    r=await fetch(path,{method:"POST",headers:{"content-type":"application/json"},
+      body:JSON.stringify(body),signal:ctrl.signal});
+  }catch(e){
+    clearTimeout(timer);
+    if(attempt===0){await new Promise(s=>setTimeout(s,1200));return ask(path,body,1);}
+    throw new NetworkDown(e.name==="AbortError"
+      ? "The check took longer than 45 seconds and was stopped. The oracle may be busy - try again in a moment."
+      : "Couldn't reach the oracle. Your connection dropped, or the service is restarting. Try again in a few seconds.");
+  }finally{clearTimeout(timer);}
+  let d;
+  try{d=await r.json();}
+  catch(e){throw new NetworkDown("The oracle replied with something unreadable. Try again in a moment.");}
+  if(!r.ok&&d&&d.detail){throw new Error(typeof d.detail==="string"?d.detail:JSON.stringify(d.detail));}
+  return d;
+}
 function copyBtn(text){const id="c"+Math.random().toString(36).slice(2,8);
   setTimeout(()=>{const el=document.getElementById(id);if(el)el.onclick=()=>{navigator.clipboard.writeText(text).then(()=>{el.classList.add("done");el.innerHTML=CHECK;setTimeout(()=>{el.classList.remove("done");el.innerHTML=COPYIC;},1200);});};},0);
   return `<button class="copy" id="${id}" aria-label="Copy" title="Copy">${COPYIC}</button>`;}
@@ -478,7 +501,7 @@ const CROSS='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-w
 const RESULT=()=>$("result");
 function showEmpty(){RESULT().innerHTML=`<div class="empty"><svg class="eye" viewBox="0 0 100 100" fill="none"><path d="M74 26 A34 34 0 1 0 74 74" stroke="var(--faint)" stroke-width="9" stroke-linecap="round"/><circle cx="50" cy="50" r="8" fill="var(--faint)"/></svg><div class="t">She has not spoken yet.</div><div class="s">Pick an example above or paste your own, then run the check.</div></div>`;}
 function showLoading(){RESULT().innerHTML=`<div class="loading"><div class="spin"></div><div class="t">Cassandra is looking…</div></div>`;}
-const VMETA={red:{cls:"v-red",t:"High Risk",ic:'<path d="M12 3l9 16H3L12 3z" stroke-linejoin="round"/><path d="M12 10v4M12 17v.4" stroke-linecap="round"/>'},yellow:{cls:"v-amber",t:"Proceed with caution",ic:'<circle cx="12" cy="12" r="9"/><path d="M12 8v4.5M12 16v.4" stroke-linecap="round"/>'},green:{cls:"v-green",t:"Looks clear",ic:'<circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.5 2.5L16 9" stroke-linecap="round" stroke-linejoin="round"/>'},error:{cls:"v-error",t:"Couldn't read it",ic:'<circle cx="12" cy="12" r="9"/><path d="M12 8v4.5M12 16v.4" stroke-linecap="round"/>'}};
+const VMETA={red:{cls:"v-red",t:"High Risk",ic:'<path d="M12 3l9 16H3L12 3z" stroke-linejoin="round"/><path d="M12 10v4M12 17v.4" stroke-linecap="round"/>'},yellow:{cls:"v-amber",t:"Proceed with caution",ic:'<circle cx="12" cy="12" r="9"/><path d="M12 8v4.5M12 16v.4" stroke-linecap="round"/>'},green:{cls:"v-green",t:"Looks clear",ic:'<circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.5 2.5L16 9" stroke-linecap="round" stroke-linejoin="round"/>'},error:{cls:"v-error",t:"Couldn't read it",ic:'<circle cx="12" cy="12" r="9"/><path d="M12 8v4.5M12 16v.4" stroke-linecap="round"/>'},offline:{cls:"v-error",t:"Couldn't reach the oracle",ic:'<path d="M3 3l18 18" stroke-linecap="round"/><path d="M8.5 16.5a5 5 0 016.2-7.4M5 12.5a9 9 0 012.6-4.7M19 15.5a5.5 5.5 0 00-3.4-6.4" stroke-linecap="round"/>'}};
 function banner(v,summary){const m=VMETA[v]||VMETA.error;return `<div class="verdict ${m.cls}"><div class="vic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">${m.ic}</svg></div><div><div class="vt">${m.t}</div><div class="vs">${esc(summary||"")}</div></div></div>`;}
 function rawblock(d){return `<details><summary>Raw JSON response</summary><pre>${esc(JSON.stringify(d,null,2))}</pre></details>`;}
 function intelCard(title,obj){
@@ -568,7 +591,11 @@ async function runTool(build,render){$("runbtn").disabled=true;showLoading();
     const label=body.wallet?short(body.wallet):body.token?short(body.token):body.tx?"tx":(body.to?short(body.to):(body.wallets?body.wallets.length+" wallets":""));
     const full=body.wallet||body.token||"";const v=d.verdict||(d.overall_probability_same!=null?(d.overall_probability_same>=0.45?"red":d.overall_probability_same>=0.25?"yellow":"green"):undefined);
     let hist=[];try{hist=JSON.parse(localStorage.getItem("cass-hist")||"[]");}catch(e){}hist.unshift({tool:TAB,chain:CHAIN,label,full,verdict:v,ts:Date.now()});hist=hist.slice(0,6);try{localStorage.setItem("cass-hist",JSON.stringify(hist));}catch(e){}renderHistory();
-  }catch(e){show(banner("error",e.message||String(e)));}finally{$("runbtn").disabled=false;}}
+  }catch(e){const down=e instanceof NetworkDown;
+    show(banner(down?"offline":"error",e.message||String(e))
+      +`<div style="margin-top:14px"><button class="run" id="retrybtn" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 11-2.6-6.4"/><path d="M21 3v6h-6"/></svg>Try again</button></div>`);
+    const rb=$("retrybtn"); if(rb) rb.onclick=()=>RUN[TAB]();
+  }finally{$("runbtn").disabled=false;}}
 const RUN={
   scan:()=>runTool(()=>({chain:CHAIN,wallet:$("scan-wallet").value.trim()}),renderScan),
   sig:()=>runTool(()=>{if(KIND==="sol")return{chain:CHAIN,tx:$("sig-tx").value.trim()};const td=$("sig-typed").value.trim();if(td){let j;try{j=JSON.parse(td);}catch(e){throw new Error("Signed-message box is not valid EIP-712 JSON");}return{chain:CHAIN,typed_data:j};}return{chain:CHAIN,to:$("sig-to").value.trim(),data:$("sig-data").value.trim()||"0x"};},renderSig),
