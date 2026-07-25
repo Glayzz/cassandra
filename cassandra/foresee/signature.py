@@ -362,24 +362,43 @@ async def analyze_calldata(
         )
 
     if op_type == "multicall":
-        # We flag but do not recurse in MVP
+        # Decode every wrapped call. This is where drainers hide: the wallet
+        # renders one innocuous "multicall" prompt while a permit + transferFrom
+        # sit inside it. Surfacing the inner calls is the whole point.
+        raw_calls = (decoded.get("args") or {}).get("calls") or []
+        inner = _decode_inner_calls(raw_calls)
+
         severity_max = _worse(severity_max, "high")
         findings.append({
             "kind": "multicall",
             "severity": "high",
             "message": (
-                "This is a `multicall` wrapping multiple inner calls. Cassandra decoded only "
-                "the outer call. Drainers frequently bundle a `permit` + `transferFrom` inside "
-                "a single multicall so wallets only surface one signature prompt."
+                f"This `multicall` wraps {len(inner)} inner call(s). Wallets show only the "
+                "outer call, so drainers bundle a `permit` + `transferFrom` inside one prompt."
             ),
         })
-        fates.append("Any of the inner calls could be an approval or transfer you didn't see.")
+
+        for c in inner:
+            if c.get("severity"):
+                severity_max = _worse(severity_max, c["severity"])
+            if c.get("finding"):
+                findings.append(c["finding"])
+            if c.get("fate"):
+                fates.append(c["fate"])
+
+        names = ", ".join(c["name"] for c in inner) or "undecodable payloads"
+        if not fates:
+            fates.append("Any of the inner calls could be an approval or transfer you didn't see.")
         return _final(
-            summary=f"multicall on {to_norm} - inner calls not fully decoded in this call.",
+            summary=f"multicall on {to_norm} wrapping {len(inner)} call(s): {names}.",
             fates=fates, findings=findings, verdict=_color(severity_max),
             target={"address": to_norm, "label": contract_label},
-            operation={"name": meta["name"], "type": op_type, "inner_calls_count":
-                       len(decoded["args"].get("calls") or []) if decoded.get("args") else None},
+            operation={"name": meta["name"], "type": op_type,
+                       "inner_calls_count": len(inner),
+                       "inner_calls": [
+                           {k: v for k, v in c.items() if k in ("name", "type", "selector", "detail")}
+                           for c in inner
+                       ]},
         )
 
     if op_type == "swap":
@@ -416,6 +435,104 @@ async def analyze_calldata(
         target={"address": to_norm, "label": contract_label},
         operation={"name": meta["name"], "type": op_type, "args": _stringify_args(decoded["args"])},
     )
+
+
+# ---- multicall unwrapping ----
+
+def _decode_inner_calls(raw_calls: Any) -> list[dict]:
+    """Decode each payload wrapped in a multicall into a named, rated finding.
+
+    Pure and synchronous: it only reads the calldata already in front of us, so
+    unwrapping never adds a network round-trip to the signing path.
+    """
+    out: list[dict] = []
+    if not isinstance(raw_calls, (list, tuple)):
+        return out
+
+    for idx, blob in enumerate(raw_calls[:20]):  # bound the work; 20 is generous
+        if isinstance(blob, (bytes, bytearray)):
+            hexed = "0x" + blob.hex()
+        elif isinstance(blob, str):
+            hexed = blob if blob.startswith("0x") else "0x" + blob
+        else:
+            out.append({"name": "undecodable", "type": "unknown", "selector": None,
+                        "detail": "inner payload was not bytes"})
+            continue
+
+        parsed = _split_calldata(hexed)
+        if not parsed:
+            out.append({"name": "undecodable", "type": "unknown", "selector": None,
+                        "detail": "inner payload is not valid calldata"})
+            continue
+
+        sel_, arg_bytes = parsed
+        dec = _decode_selector(sel_, arg_bytes)
+        if not dec or not dec.get("known"):
+            out.append({
+                "name": f"unknown({sel_})", "type": "unknown", "selector": sel_,
+                "detail": "selector not in Cassandra's registry",
+                "severity": "medium",
+                "finding": {
+                    "kind": "multicall_unknown_inner", "severity": "medium",
+                    "message": (f"Inner call #{idx + 1} uses unrecognised selector {sel_} - "
+                                "its effect cannot be verified before you sign."),
+                },
+            })
+            continue
+
+        m = dec["meta"]
+        args = dec.get("args") or {}
+        entry: dict = {"name": m["name"], "type": m["type"], "selector": sel_}
+
+        if m["type"] in ("token_approve", "gasless_approve"):
+            spender = _safe_addr(args.get("spender"))
+            amount = int(args.get("amount") or args.get("value") or 0)
+            unlimited = amount >= _UNLIMITED_THRESHOLD
+            entry["detail"] = f"spender={spender}, amount={'UNLIMITED' if unlimited else amount}"
+            entry["severity"] = "critical"
+            entry["finding"] = {
+                "kind": "multicall_hidden_approval", "severity": "critical",
+                "message": (
+                    f"Inner call #{idx + 1} is a hidden {m['name']}: it grants "
+                    f"{'UNLIMITED' if unlimited else str(amount)} spending power to {spender}. "
+                    "This is buried inside the multicall - your wallet will not show it."
+                ),
+            }
+            entry["fate"] = (f"{spender} gains {'UNLIMITED' if unlimited else str(amount)} "
+                             "spending rights over your tokens.")
+        elif m["type"] == "nft_approve_all" and args.get("approved"):
+            operator = _safe_addr(args.get("operator"))
+            entry["detail"] = f"operator={operator}"
+            entry["severity"] = "critical"
+            entry["finding"] = {
+                "kind": "multicall_hidden_approval", "severity": "critical",
+                "message": (f"Inner call #{idx + 1} hides a setApprovalForAll granting "
+                            f"{operator} every NFT in the collection."),
+            }
+            entry["fate"] = f"{operator} can take every NFT you own in that collection."
+        elif m["type"] in ("token_transferFrom", "token_transfer", "nft_transfer",
+                           "nft_transfer_batch"):
+            recipient = _safe_addr(args.get("to") or args.get("recipient"))
+            entry["detail"] = f"to={recipient}"
+            entry["severity"] = "high"
+            entry["finding"] = {
+                "kind": "multicall_hidden_transfer", "severity": "high",
+                "message": (f"Inner call #{idx + 1} moves assets to {recipient} as part of "
+                            "this bundle."),
+            }
+            entry["fate"] = f"Assets move to {recipient}."
+        else:
+            entry["detail"] = m["name"]
+
+        out.append(entry)
+    return out
+
+
+def _safe_addr(v: Any) -> str:
+    try:
+        return _to_addr(v)
+    except Exception:
+        return "0x?"
 
 
 # ---- EIP-712 typed data ----

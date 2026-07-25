@@ -2,7 +2,7 @@
 
 **The wallet's pre-loss oracle.** Ask one question — _how do I lose money next?_ — and get a truthful answer before you sign.
 
-![status](https://img.shields.io/badge/status-live-1f9d59) ![version](https://img.shields.io/badge/version-0.5.0-5a4be0) ![protocol](https://img.shields.io/badge/A2MCP-agent--native-4536c9) ![chains](https://img.shields.io/badge/EVM%20%2B%20Solana-7%20networks-b0862f) ![license](https://img.shields.io/badge/license-MIT-8a8a95)
+![status](https://img.shields.io/badge/status-live-1f9d59) ![version](https://img.shields.io/badge/version-0.6.0-5a4be0) ![protocol](https://img.shields.io/badge/A2MCP-agent--native-4536c9) ![chains](https://img.shields.io/badge/EVM%20%2B%20Solana-7%20networks-b0862f) ![license](https://img.shields.io/badge/license-MIT-8a8a95)
 
 > **Live:** https://cassandra-oracle.fly.dev · **MCP:** `/mcp` · **Playground:** `/demo`
 
@@ -34,11 +34,27 @@ Each oracle answers a different way you can lose money. All are stateless, free,
 
 ---
 
-## What's new in v0.5.0
+## What's new in v0.6.0
 
-- **Off-chain signature-drainer detection.** Most wallets today are drained by a message you *sign*, not a transaction you send. Sign-Time now decodes EIP-712 typed data — ERC-2612 / DAI permit, Permit2 allowance and transfer, Seaport orders — and names exactly what signing authorizes.
-- **Lighthouse Shield (Solana).** For a risky Solana transaction, Sign-Time returns ready-to-append [Lighthouse](https://lighthouse.voyage) assertion instructions so the transaction reverts instead of draining. Cassandra decides the guardrails; your wallet's Lighthouse client encodes them.
-- **Complete approval discovery.** Standing Doors now finds ERC-20 approvals from `Approval` event logs, catching grants set via routers/aggregators and older approvals a transaction-history scan misses.
+**Detection that doesn't need a blocklist.** A blocklist only knows the address someone has *already* been robbed by, and drainer campaigns rotate addresses constantly. Cassandra now profiles whoever a signature is about to empower, structurally:
+
+- **The spender is a wallet, not a protocol.** Legitimate spenders — routers, marketplaces, lending pools, Permit2 — are *always* contracts. An approval or permit whose spender is a plain EOA has no honest use, and it is the clearest drainer signature there is. Flagged **critical**, with no prior knowledge of the address.
+- **The spender contract is brand new.** Drainer infrastructure is disposable: a throwaway proxy per victim wave. A contract that is days old receiving spending power is flagged **critical**; under a month, **high**.
+- **The spender's source is unverified**, so nobody — including you — can read what it does with your tokens.
+
+**Hidden calls inside a `multicall` are now decoded.** Wallets render one innocuous "multicall" prompt while a `permit` + `transferFrom` sit inside it. Cassandra unwraps every inner call and names the ones that grant or move assets.
+
+**Unknown is no longer treated as bad.** When a data source is unreachable, Cassandra says so and scores nothing for it, instead of reporting "unverified contract" and inventing risk. A security oracle that cries wolf gets ignored exactly when it is right.
+
+**It always answers in time.** Every oracle runs under a hard time budget and returns a degraded-but-honest verdict rather than hanging. RPC reads fail over across multiple endpoints per chain, so one rate-limited provider can't silently switch the structural checks off.
+
+**Agent-native transport hardening.** The MCP endpoint is stateless with plain-JSON responses, so any client can call it without threading a session id or negotiating SSE.
+
+### Earlier — v0.5.0
+
+- **Off-chain signature-drainer detection.** Most wallets today are drained by a message you *sign*, not a transaction you send. Sign-Time decodes EIP-712 typed data — ERC-2612 / DAI permit, Permit2 allowance and transfer, Seaport orders — and names exactly what signing authorizes.
+- **Lighthouse Shield (Solana).** For a risky Solana transaction, Sign-Time returns ready-to-append [Lighthouse](https://lighthouse.voyage) assertion instructions so the transaction reverts instead of draining.
+- **Complete approval discovery.** Standing Doors finds ERC-20 approvals from `Approval` event logs, catching grants set via routers/aggregators and older approvals a transaction-history scan misses.
 
 ---
 

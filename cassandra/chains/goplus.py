@@ -29,7 +29,9 @@ class GoPlus:
     def __init__(self, client: httpx.AsyncClient | None = None) -> None:
         s = get_settings()
         self._key = s.goplus_api_key
-        self._client = client or httpx.AsyncClient(timeout=15.0)
+        self._client = client or httpx.AsyncClient(
+            timeout=httpx.Timeout(8.0, connect=4.0, read=7.0)
+        )
         self._cache = TTLCache(ttl=300.0)
 
     async def close(self) -> None:

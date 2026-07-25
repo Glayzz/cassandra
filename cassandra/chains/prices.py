@@ -18,12 +18,14 @@ _CHAIN_SLUG = {
 
 class Prices:
     def __init__(self, client: httpx.AsyncClient | None = None) -> None:
-        self._client = client or httpx.AsyncClient(timeout=15.0)
+        self._client = client or httpx.AsyncClient(
+            timeout=httpx.Timeout(8.0, connect=4.0, read=7.0)
+        )
 
     async def close(self) -> None:
         await self._client.aclose()
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential_jitter(initial=0.5, max=4.0))
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential_jitter(initial=0.3, max=1.5))
     async def usd_prices(self, tokens: list[tuple[int, str]]) -> dict[str, float]:
         """Batch-fetch USD prices. Input: [(chain_id, token_address)]. Output: {addr_lower: price}."""
         if not tokens:
@@ -50,7 +52,7 @@ class Prices:
                 out[addr] = float(obj["price"])
         return out
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential_jitter(initial=0.5, max=4.0))
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential_jitter(initial=0.3, max=1.5))
     async def usd_prices_solana(self, mints: list[str]) -> dict[str, float]:
         """USD prices for SPL mints. Solana addresses are case-sensitive base58 -
         do NOT lowercase them. Output keyed by the original mint string."""

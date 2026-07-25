@@ -8,6 +8,7 @@ Two novelties over generic honeypot scanners:
 """
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
@@ -56,13 +57,35 @@ async def analyze_token(
     etherscan: Etherscan,
     rpc: Rpc,
     prices: Prices,
-    family_depth: int = 15,
+    family_depth: int = 8,
     goplus=None,
 ) -> dict:
     token_l = token.lower()
 
-    # 1. Contract source + metadata
-    src = await etherscan.get_source(token, chain_id)
+    # Steps 1-4 are independent network reads -> run them CONCURRENTLY so total
+    # latency is the slowest single call, not their sum. Each is wrapped so one
+    # failure degrades that field to a default instead of failing the whole tool.
+    async def _read(coro, default=None):
+        try:
+            return await coro
+        except Exception:
+            return default
+
+    src, creation, raw_supply, raw_decimals, raw_symbol, pmap = await asyncio.gather(
+        _read(etherscan.get_source(token, chain_id), {}),
+        _read(etherscan.get_contract_creation([token], chain_id), []),
+        _read(rpc.eth_call(chain_id, token, "0x18160ddd")),   # totalSupply
+        _read(rpc.eth_call(chain_id, token, "0x313ce567")),   # decimals
+        _read(rpc.eth_call(chain_id, token, "0x95d89b41")),   # symbol
+        _read(prices.usd_prices([(chain_id, token)]), {}),
+    )
+
+    # 1. Contract source + metadata.
+    # `source_unavailable` distinguishes "Etherscan says unverified" from "we
+    # could not reach Etherscan". Scoring the second as unverified invents risk
+    # that isn't there - the fastest way to make a security oracle untrustworthy.
+    source_unavailable = not isinstance(src, dict) or not src
+    src = src if isinstance(src, dict) else {}
     contract_name = src.get("ContractName") if src else None
     is_verified = bool(src and src.get("SourceCode"))
     is_proxy = str(src.get("Proxy") or "0") == "1"
@@ -71,39 +94,19 @@ async def analyze_token(
     source_code = src.get("SourceCode") if is_verified else ""
 
     # 2. Deployment info
-    creation = await etherscan.get_contract_creation([token], chain_id)
     deployer = None
     creation_tx = None
     if creation and isinstance(creation, list) and creation:
         deployer = (creation[0].get("contractCreator") or "").lower()
         creation_tx = creation[0].get("txHash")
 
-    # 3. Token supply + decimals + name via reads
-    supply = decimals = 0
-    symbol = None
-    try:
-        raw = await rpc.eth_call(chain_id, token, "0x18160ddd")  # totalSupply
-        supply = int(raw, 16) if raw and raw != "0x" else 0
-    except Exception:
-        pass
-    try:
-        raw = await rpc.eth_call(chain_id, token, "0x313ce567")  # decimals
-        decimals = int(raw, 16) if raw and raw != "0x" else 18
-    except Exception:
-        decimals = 18
-    try:
-        raw = await rpc.eth_call(chain_id, token, "0x95d89b41")  # symbol
-        symbol = _decode_string(raw)
-    except Exception:
-        pass
+    # 3. Token supply + decimals + symbol from the concurrent reads
+    supply = int(raw_supply, 16) if raw_supply and raw_supply != "0x" else 0
+    decimals = int(raw_decimals, 16) if raw_decimals and raw_decimals != "0x" else 18
+    symbol = _decode_string(raw_symbol) if raw_symbol else None
 
     # 4. Live price
-    price = None
-    try:
-        pmap = await prices.usd_prices([(chain_id, token)])
-        price = pmap.get(token_l)
-    except Exception:
-        pass
+    price = (pmap or {}).get(token_l)
 
     # 5. Source pattern hits
     pattern_hits: list[dict] = []
@@ -131,6 +134,7 @@ async def analyze_token(
         is_verified=is_verified,
         is_proxy=is_proxy,
         family=family,
+        source_unavailable=source_unavailable,
     )
 
     # --- GoPlus Security enrichment (authoritative on token mechanics) ---
@@ -172,7 +176,10 @@ async def analyze_token(
             "deployer": deployer,
             "creation_tx": creation_tx,
             "goplus": goplus_meta,
+            "source_status": "unavailable" if source_unavailable else (
+                "verified" if is_verified else "unverified"),
         },
+        "degraded": source_unavailable,
         "security": security_badges,
         "pattern_evidence": pattern_hits,
         "deployer_family_tree": family,
@@ -202,9 +209,18 @@ async def _deployer_family_tree(
         if len(deployed) >= depth:
             break
 
-    # For each deployment, determine fate
-    for d in deployed:
-        d.update(await _classify_fate(d["address"], chain_id, etherscan, rpc, prices))
+    # Classify every deployment's fate CONCURRENTLY. Doing this sequentially was
+    # the single biggest latency sink (depth x 3 serialized RPC reads); the
+    # Etherscan client's own semaphore still caps real fan-out to the rps budget.
+    fates = await asyncio.gather(
+        *(_classify_fate(d["address"], chain_id, etherscan, rpc, prices) for d in deployed),
+        return_exceptions=True,
+    )
+    for d, fate in zip(deployed, fates):
+        if isinstance(fate, dict):
+            d.update(fate)
+        else:
+            d["status"] = "unknown"
     return deployed
 
 
@@ -286,10 +302,16 @@ def _decode_string(raw: str) -> str | None:
 # ---- Scoring ----
 
 def _score(*, pattern_hits: list[dict], is_verified: bool, is_proxy: bool,
-           family: list[dict]) -> tuple[int, str, list[str]]:
+           family: list[dict], source_unavailable: bool = False) -> tuple[int, str, list[str]]:
     score = 0
     reasons: list[str] = []
-    if not is_verified:
+    if source_unavailable:
+        # Unknown is not a finding. Say so plainly and score nothing for it.
+        reasons.append(
+            "Could not reach the contract-source provider, so verification status is UNKNOWN "
+            "for this token. This is not a risk finding - it means one input was missing."
+        )
+    elif not is_verified:
         score += 30
         reasons.append("Contract source is NOT verified on Etherscan - you have no visibility into what it does.")
     if is_proxy:

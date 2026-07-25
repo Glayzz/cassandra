@@ -25,21 +25,32 @@ class Etherscan:
         s = get_settings()
         self._base = s.etherscan_base
         self._key = s.etherscan_api_key
-        self._client = client or httpx.AsyncClient(timeout=20.0)
+        # Tight, explicit timeouts so a single hung upstream can never stall a
+        # whole tool call past the platform's task budget. connect fast, read short.
+        self._client = client or httpx.AsyncClient(
+            timeout=httpx.Timeout(9.0, connect=4.0, read=8.0)
+        )
         # crude rate limiter: 4 rps to stay under 5 rps free tier
         self._sem = asyncio.Semaphore(4)
 
     async def close(self) -> None:
         await self._client.aclose()
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential_jitter(initial=0.5, max=4.0))
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential_jitter(initial=0.3, max=1.5))
     async def _get(self, params: dict[str, Any]) -> Any:
         params = {**params, "apikey": self._key}
         async with self._sem:
             r = await self._client.get(self._base, params=params)
         r.raise_for_status()
         data = r.json()
-        # Etherscan wraps everything: {status, message, result}
+        # The `proxy` module answers in raw JSON-RPC shape ({jsonrpc, id, result})
+        # with no `status` field, so it must be unwrapped before the status check
+        # below - otherwise every proxy call raises and the RPC fallback is dead.
+        if "jsonrpc" in data:
+            if "error" in data:
+                raise EtherscanError(f"etherscan proxy error: {data['error']}")
+            return data.get("result")
+        # Etherscan wraps everything else: {status, message, result}
         # status=1 -> ok, status=0 -> either "no records" or error
         if data.get("status") == "1":
             return data["result"]
@@ -147,6 +158,14 @@ class Etherscan:
         return await self._get({
             "chainid": chain_id, "module": "proxy", "action": "eth_call",
             "to": to, "data": data, "tag": "latest",
+        })
+
+    async def eth_get_code(self, address: str, chain_id: int) -> str:
+        """Runtime bytecode via the Etherscan proxy module - the fallback path when
+        every JSON-RPC endpoint for the chain is rate-limited or down."""
+        return await self._get({
+            "chainid": chain_id, "module": "proxy", "action": "eth_getCode",
+            "address": address, "tag": "latest",
         })
 
     async def eth_block_by_number(self, block: str, chain_id: int) -> dict:

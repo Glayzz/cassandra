@@ -9,8 +9,10 @@ Run:
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -36,6 +38,7 @@ from .foresee.approvals import audit_approvals
 from .foresee.identity import compare_wallets
 from .foresee.signature import analyze_calldata
 from .foresee.eip712 import analyze_typed_data
+from .foresee import counterparty
 from .foresee.lighthouse import build_shield
 from .foresee.token import analyze_token
 from .foresee.solana import (
@@ -81,7 +84,113 @@ else:  # pragma: no cover
         return _wrap
 
 
+# ---- time budget -------------------------------------------------------------
+# Every tool MUST return within the platform's task window even when an upstream
+# data source hangs. On overrun we return a graceful, degraded verdict instead of
+# leaving the caller waiting (the failure mode that got the listing rejected).
+_TOOL_BUDGET = float(os.getenv("TOOL_BUDGET_SECONDS", "22"))
+
+
+class _MissingField(ValueError):
+    """A required caller input was not supplied (translated to a clean verdict)."""
+
+
+async def _budget(coro, kind: str) -> dict:
+    try:
+        return await asyncio.wait_for(coro, timeout=_TOOL_BUDGET)
+    except _MissingField as e:
+        return {"verdict": "error", "summary": str(e)}
+    except asyncio.TimeoutError:
+        return {
+            "verdict": "unknown",
+            "degraded": True,
+            "summary": (
+                f"The {kind} analysis exceeded the {int(_TOOL_BUDGET)}s budget because an "
+                "upstream data source was slow. Nothing conclusive was found - retry shortly."
+            ),
+        }
+
+
+# ---- shared oracle cores (one implementation, used by MCP tools AND REST) -----
+# `track=True` adds the optional external-tracker enrichment used by the demo REST
+# facade; the MCP tools stay lean (track=False).
+
+async def _core_signature(chain, to, data, value_wei, typed_data, tx, expected) -> dict:
+    net = resolve(chain)
+    if net.is_solana:
+        if not tx:
+            raise _MissingField("Solana requires `tx` (base64 transaction).")
+        res = analyze_solana_tx(tx)
+        res["shield"] = build_shield(res, expected)
+        return res
+    d = get_deps()
+    if typed_data:
+        res = analyze_typed_data(typed_data)
+    elif to:
+        res = await analyze_calldata(
+            to=to, data=data, chain_id=net.chain_id, value_wei=value_wei,
+            etherscan=d.etherscan, rpc=d.rpc,
+        )
+    else:
+        raise _MissingField("EVM requires `to` (+ `data`) or `typed_data`.")
+    res = await reputation.enrich_signature(res, net.chain_id, d.goplus)
+    # Structural profile of whoever this signature empowers. Catches drainers no
+    # blocklist has seen yet (fresh proxy contracts, EOA spenders).
+    return await counterparty.enrich(
+        res, net.chain_id, rpc=d.rpc, etherscan=d.etherscan, goplus=d.goplus,
+    )
+
+
+async def _core_approvals(wallet, chain) -> dict:
+    net = resolve(chain)
+    d = get_deps()
+    if net.is_solana:
+        return await audit_solana_approvals(wallet, d.solana, d.prices)
+    res = await audit_approvals(
+        wallet=wallet, chain_id=net.chain_id,
+        etherscan=d.etherscan, rpc=d.rpc, prices=d.prices,
+    )
+    return await reputation.enrich_approvals(res, net.chain_id, d.goplus)
+
+
+async def _core_token(token, chain, family_depth=8, *, track=False) -> dict:
+    net = resolve(chain)
+    d = get_deps()
+    if net.is_solana:
+        res = await analyze_solana_token(token, d.solana, d.prices, goplus=d.goplus)
+    else:
+        res = await analyze_token(
+            token=token, chain_id=net.chain_id, etherscan=d.etherscan, rpc=d.rpc,
+            prices=d.prices, family_depth=family_depth, goplus=d.goplus,
+        )
+    return await enrich_token(res, token, chain) if track else res
+
+
+async def _core_identity(wallets, chain, *, track=False) -> dict:
+    net = resolve(chain)
+    d = get_deps()
+    if net.is_solana:
+        res = await compare_solana_wallets(wallets, d.solana)
+    else:
+        res = await compare_wallets(wallets=wallets, chain_id=net.chain_id, etherscan=d.etherscan)
+    return await enrich_identity(res, wallets, chain) if track else res
+
+
+async def _core_scan(wallet, chain, *, track=False) -> dict:
+    net = resolve(chain)
+    d = get_deps()
+    if net.is_solana:
+        res = await wallet_xray_solana(wallet, d.solana, d.prices)
+    else:
+        res = await wallet_xray_evm(wallet, net.chain_id, d.etherscan, d.rpc, d.prices, goplus=d.goplus)
+    return await enrich_scan(res, wallet, chain) if track else res
+
+
 # ---- MCP tools ----------------------------------------------------------------
+
+# Each tool runs its real work under _budget() so the MCP caller ALWAYS gets a
+# reply inside the platform's task window - the core cores below are shared with
+# the REST facade further down.
 
 @_tool()
 async def foresee_signature(
@@ -99,62 +208,28 @@ async def foresee_signature(
     EIP-712 signTypedData request.
     Solana: set chain="solana" and provide `tx` = base64 serialized transaction.
     """
-    net = resolve(chain)
-    if net.is_solana:
-        if not tx:
-            return {"verdict": "error", "summary": "Solana requires `tx` (base64 transaction)."}
-        res = analyze_solana_tx(tx)
-        res["shield"] = build_shield(res, expected)
-        return res
-    if typed_data:
-        d = get_deps()
-        res = analyze_typed_data(typed_data)
-        return await reputation.enrich_signature(res, net.chain_id, d.goplus)
-    if not to:
-        return {"verdict": "error", "summary": "EVM requires `to` (+ `data`) or `typed_data`."}
-    d = get_deps()
-    res = await analyze_calldata(
-        to=to, data=data, chain_id=net.chain_id, value_wei=value_wei,
-        etherscan=d.etherscan, rpc=d.rpc,
+    return await _budget(
+        _core_signature(chain, to, data, value_wei, typed_data, tx, expected),
+        "signature",
     )
-    return await reputation.enrich_signature(res, net.chain_id, d.goplus)
 
 
 @_tool()
 async def foresee_approvals(wallet: str, chain: str = "ethereum") -> dict:
     """Enumerate every open approval a wallet has granted, ranked by live USD exposure."""
-    net = resolve(chain)
-    d = get_deps()
-    if net.is_solana:
-        return await audit_solana_approvals(wallet, d.solana, d.prices)
-    res = await audit_approvals(
-        wallet=wallet, chain_id=net.chain_id,
-        etherscan=d.etherscan, rpc=d.rpc, prices=d.prices,
-    )
-    return await reputation.enrich_approvals(res, net.chain_id, d.goplus)
+    return await _budget(_core_approvals(wallet, chain), "approvals")
 
 
 @_tool()
-async def foresee_token(token: str, chain: str = "ethereum", family_depth: int = 15) -> dict:
+async def foresee_token(token: str, chain: str = "ethereum", family_depth: int = 8) -> dict:
     """Rug-risk analysis on a token (EVM source + deployer tree; Solana mint/freeze authority)."""
-    net = resolve(chain)
-    d = get_deps()
-    if net.is_solana:
-        return await analyze_solana_token(token, d.solana, d.prices, goplus=d.goplus)
-    return await analyze_token(
-        token=token, chain_id=net.chain_id,
-        etherscan=d.etherscan, rpc=d.rpc, prices=d.prices, family_depth=family_depth, goplus=d.goplus,
-    )
+    return await _budget(_core_token(token, chain, family_depth), "token")
 
 
 @_tool()
 async def foresee_identity(wallets: list[str], chain: str = "ethereum") -> dict:
     """Are these wallets the same person? Provide 2-5 addresses; returns probability + evidence."""
-    net = resolve(chain)
-    d = get_deps()
-    if net.is_solana:
-        return await compare_solana_wallets(wallets, d.solana)
-    return await compare_wallets(wallets=wallets, chain_id=net.chain_id, etherscan=d.etherscan)
+    return await _budget(_core_identity(wallets, chain), "identity")
 
 
 @_tool()
@@ -165,11 +240,7 @@ async def foresee_scan(wallet: str, chain: str = "ethereum") -> dict:
     exposure, and a prioritised list of the biggest risks (drainer approvals,
     unlimited allowances, exposure tiers). Works on EVM and Solana.
     """
-    net = resolve(chain)
-    d = get_deps()
-    if net.is_solana:
-        return await wallet_xray_solana(wallet, d.solana, d.prices)
-    return await wallet_xray_evm(wallet, net.chain_id, d.etherscan, d.rpc, d.prices, goplus=d.goplus)
+    return await _budget(_core_scan(wallet, chain), "scan")
 
 
 # ---- FastAPI shell around the MCP app -----------------------------------------
@@ -178,10 +249,21 @@ _mcp_app = None
 _mcp_lifespan = None
 if _MCP_AVAILABLE and mcp is not None:
     try:
-        if hasattr(mcp, "http_app"):
-            _mcp_app = mcp.http_app()
-        elif hasattr(mcp, "streamable_http_app"):
-            _mcp_app = mcp.streamable_http_app()
+        # stateless_http: no server-side session to lose between requests.
+        # json_response: reply with plain JSON, not an SSE-only stream.
+        # Together these let ANY MCP client (incl. the OKX review harness) call
+        # the tools; the default stateful+SSE mode is what got the listing
+        # rejected ("unable to receive a response ... task timed out").
+        def _build_mcp(**kw):
+            if hasattr(mcp, "http_app"):
+                return mcp.http_app(**kw)
+            if hasattr(mcp, "streamable_http_app"):
+                return mcp.streamable_http_app(**kw)
+            return None
+        try:
+            _mcp_app = _build_mcp(stateless_http=True, json_response=True)
+        except TypeError:  # older fastmcp without these kwargs
+            _mcp_app = _build_mcp()
         _mcp_lifespan = getattr(_mcp_app, "lifespan", None)
     except Exception:  # pragma: no cover
         log.exception("failed to build MCP app; REST facade still available")
@@ -202,7 +284,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Cassandra",
     description="The wallet's pre-loss oracle. Five /foresee tools across EVM + Solana.",
-    version="0.5.0",
+    version="0.6.0",
     lifespan=lifespan,
 )
 
@@ -260,7 +342,7 @@ class ApprovalsReq(BaseModel):
 class TokenReq(BaseModel):
     token: str
     chain: str = "ethereum"
-    family_depth: int = Field(default=15, alias="familyDepth")
+    family_depth: int = Field(default=8, alias="familyDepth")
     model_config = {"populate_by_name": True}
 
 
@@ -276,105 +358,55 @@ class ScanReq(BaseModel):
     model_config = {"populate_by_name": True}
 
 
-@app.post("/foresee/signature")
-async def rest_signature(req: SignatureReq):
+# REST shares the exact same cores as the MCP tools, so a verdict is identical
+# through either door. Missing inputs become a 400; a blown budget becomes a 504.
+
+async def _rest(coro, kind: str):
     try:
-        net = resolve(req.chain)
-        if net.is_solana:
-            if not req.tx:
-                raise HTTPException(400, "Solana requires `tx` (base64 transaction).")
-            res = analyze_solana_tx(req.tx)
-            res["shield"] = build_shield(res, req.expected)
-            return res
-        if req.typed_data:
-            d = get_deps()
-            res = analyze_typed_data(req.typed_data)
-            return await reputation.enrich_signature(res, net.chain_id, d.goplus)
-        if not req.to:
-            raise HTTPException(400, "EVM requires `to` (+ `data`) or `typedData`.")
-        d = get_deps()
-        res = await analyze_calldata(
-            to=req.to, data=req.data, chain_id=net.chain_id, value_wei=req.value_wei,
-            etherscan=d.etherscan, rpc=d.rpc,
-        )
-        return await reputation.enrich_signature(res, net.chain_id, d.goplus)
+        return await asyncio.wait_for(coro, timeout=_TOOL_BUDGET)
+    except _MissingField as e:
+        raise HTTPException(400, str(e))
+    except asyncio.TimeoutError:
+        raise HTTPException(504, f"{kind} analysis exceeded the {int(_TOOL_BUDGET)}s budget - retry shortly.")
     except HTTPException:
         raise
     except Exception as e:
-        log.exception("signature error")
+        log.exception("%s error", kind)
         raise HTTPException(500, str(e))
+
+
+@app.post("/foresee/signature")
+async def rest_signature(req: SignatureReq):
+    return await _rest(
+        _core_signature(req.chain, req.to, req.data, req.value_wei,
+                        req.typed_data, req.tx, req.expected),
+        "signature",
+    )
 
 
 @app.post("/foresee/approvals")
 async def rest_approvals(req: ApprovalsReq):
-    try:
-        net = resolve(req.chain)
-        d = get_deps()
-        if net.is_solana:
-            return await audit_solana_approvals(req.wallet, d.solana, d.prices)
-        res = await audit_approvals(
-            wallet=req.wallet, chain_id=net.chain_id,
-            etherscan=d.etherscan, rpc=d.rpc, prices=d.prices,
-        )
-        return await reputation.enrich_approvals(res, net.chain_id, d.goplus)
-    except Exception as e:
-        log.exception("approvals error")
-        raise HTTPException(500, str(e))
+    return await _rest(_core_approvals(req.wallet, req.chain), "approvals")
 
 
 @app.post("/foresee/token")
 async def rest_token(req: TokenReq):
-    try:
-        net = resolve(req.chain)
-        d = get_deps()
-        if net.is_solana:
-            res = await analyze_solana_token(req.token, d.solana, d.prices, goplus=d.goplus)
-        else:
-            res = await analyze_token(
-                token=req.token, chain_id=net.chain_id,
-                etherscan=d.etherscan, rpc=d.rpc, prices=d.prices, family_depth=req.family_depth, goplus=d.goplus,
-            )
-        return await enrich_token(res, req.token, req.chain)
-    except Exception as e:
-        log.exception("token error")
-        raise HTTPException(500, str(e))
+    return await _rest(_core_token(req.token, req.chain, req.family_depth, track=True), "token")
 
 
 @app.post("/foresee/identity")
 async def rest_identity(req: IdentityReq):
-    try:
-        net = resolve(req.chain)
-        d = get_deps()
-        if net.is_solana:
-            res = await compare_solana_wallets(req.wallets, d.solana)
-        else:
-            res = await compare_wallets(
-                wallets=req.wallets, chain_id=net.chain_id, etherscan=d.etherscan,
-            )
-        return await enrich_identity(res, req.wallets, req.chain)
-    except Exception as e:
-        log.exception("identity error")
-        raise HTTPException(500, str(e))
+    return await _rest(_core_identity(req.wallets, req.chain, track=True), "identity")
 
 
 @app.post("/foresee/scan")
 async def rest_scan(req: ScanReq):
-    try:
-        net = resolve(req.chain)
-        d = get_deps()
-        if net.is_solana:
-            res = await wallet_xray_solana(req.wallet, d.solana, d.prices)
-        else:
-            res = await wallet_xray_evm(req.wallet, net.chain_id, d.etherscan, d.rpc, d.prices, goplus=d.goplus)
-        return await enrich_scan(res, req.wallet, req.chain)
-    except Exception as e:
-        log.exception("scan error")
-        raise HTTPException(500, str(e))
+    return await _rest(_core_scan(req.wallet, req.chain, track=True), "scan")
 
 
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
-    return {"status": "ok", "service": "cassandra", "version": "0.5.0", "mcp": _MCP_AVAILABLE}
+    return {"status": "ok", "service": "cassandra", "version": "0.6.0", "mcp": _MCP_AVAILABLE}
 
 
 @app.get("/ready")
@@ -400,7 +432,14 @@ async def stats():
         "drainers_tracked": len(KNOWN_DRAINERS) + len(KNOWN_SOL_DRAINERS),
         "price_source": "DeFiLlama",
         "data_sources": ["Etherscan v2", "Solana RPC", "DeFiLlama", "Helius DAS", "GoPlus Security"],
-        "features": ["eip712_signature_analysis", "lighthouse_shield", "approval_log_scan", "permit2", "nft_approvals", "token_security", "malicious_address_intel", "caching", "rate_limited"],
+        "features": [
+            "eip712_signature_analysis", "lighthouse_shield", "approval_log_scan",
+            "permit2", "nft_approvals", "token_security", "malicious_address_intel",
+            "counterparty_profiling", "eoa_spender_detection", "fresh_contract_detection",
+            "multicall_inner_call_decoding", "graceful_degradation", "bounded_latency",
+            "stateless_mcp", "caching", "rate_limited",
+        ],
+        "tool_budget_seconds": _TOOL_BUDGET,
     }
 
 
@@ -409,8 +448,9 @@ async def manifest():
     return {
         "name": "Cassandra",
         "tagline": "The wallet's pre-loss oracle.",
-        "version": "0.5.0",
+        "version": "0.6.0",
         "protocol": "A2MCP",
+        "transport": {"type": "streamable-http", "stateless": True, "json_response": True},
         "pricing": "free",
         "endpoints": {
             "mcp": "/mcp",
