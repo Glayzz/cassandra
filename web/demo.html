@@ -166,6 +166,131 @@ footer{background:var(--surface-2);border-top:1px solid var(--hair);margin-top:4
 .foot-links{display:flex;gap:8px;flex-wrap:wrap} .foot-links a{font-family:var(--mono);font-size:12.5px;color:var(--body);border:1px solid var(--hair);background:var(--surface);padding:8px 13px;border-radius:9px} .foot-links a:hover{border-color:var(--accent);color:var(--accent-ink)}
 .foot-bottom{border-top:1px solid var(--hair);padding:16px 22px;text-align:center;font-family:var(--mono);font-size:11.5px;color:var(--faint);letter-spacing:.06em}
 @media(max-width:560px){.sc-actions{flex-direction:column;align-items:stretch} button.run{width:100%;justify-content:center}}
+
+/* ══════════════════════════════════════════════════════════════
+   PREMIUM LAYER
+   Finishing pass over the system above. The verdict is the point of
+   this page, so it gets the highest plane and the only colour bloom;
+   chrome recedes, data surfaces sit between. Both themes carry their
+   own gloss tokens. No markup or script changes.
+   ══════════════════════════════════════════════════════════════ */
+:root{
+  --spec:linear-gradient(163deg,#ffffff 0%,#fdfcfa 44%,#f7f5f0 100%);
+  --spec-2:linear-gradient(163deg,#fdfcfa 0%,#f5f3ed 100%);
+  --rim:inset 0 1px 0 rgba(255,255,255,.92), inset 0 0 0 1px rgba(255,255,255,.45);
+  --lift:0 1px 2px rgba(20,17,25,.04), 0 8px 18px -10px rgba(20,17,25,.18),
+         0 28px 56px -28px rgba(20,17,25,.26);
+  --lift-hi:0 2px 4px rgba(20,17,25,.05), 0 14px 28px -12px rgba(20,17,25,.22),
+            0 48px 90px -34px rgba(20,17,25,.34);
+  --inset-fld:inset 0 2px 5px rgba(20,17,25,.07), inset 0 1px 0 rgba(255,255,255,.6);
+  --spring:cubic-bezier(.34,1.4,.5,1);
+}
+[data-theme="dark"]{
+  --spec:linear-gradient(163deg,#1d1d27 0%,#191922 46%,#141419 100%);
+  --spec-2:linear-gradient(163deg,#191922 0%,#131318 100%);
+  --rim:inset 0 1px 0 rgba(255,255,255,.07), inset 0 0 0 1px rgba(255,255,255,.03);
+  --lift:0 1px 2px rgba(0,0,0,.4), 0 10px 24px -12px rgba(0,0,0,.6),
+         0 34px 64px -30px rgba(0,0,0,.75);
+  --lift-hi:0 2px 6px rgba(0,0,0,.5), 0 18px 36px -14px rgba(0,0,0,.65),
+            0 56px 100px -36px rgba(0,0,0,.85);
+  --inset-fld:inset 0 2px 6px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.05);
+}
+
+/* --- atmosphere + chrome --- */
+body::before{background:
+  radial-gradient(56vw 38vw at 84% -14%, color-mix(in srgb,var(--accent) 13%,transparent), transparent 62%),
+  radial-gradient(46vw 34vw at -4% 2%, color-mix(in srgb,var(--sol) 9%,transparent), transparent 58%),
+  radial-gradient(30vw 20vw at 50% 106%, color-mix(in srgb,var(--gold) 8%,transparent), transparent 62%)}
+nav{background:color-mix(in srgb,var(--bg) 72%,transparent);
+  backdrop-filter:blur(20px) saturate(1.7)}
+.brand .eye circle{transform-origin:50% 50%;animation:eyebreath 3.2s ease-in-out infinite}
+@keyframes eyebreath{0%,100%{opacity:.85;transform:scale(1)}50%{opacity:1;transform:scale(1.13)}}
+
+/* --- plane 01: chrome --- */
+.toolbar{background:var(--spec-2);box-shadow:var(--shadow-sm), inset 0 1px 0 rgba(255,255,255,.55)}
+.ttab{transition:transform .26s var(--spring), background .2s, color .2s, box-shadow .26s var(--spring)}
+.ttab.active{background:var(--spec);
+  box-shadow:var(--shadow-sm), inset 0 1px 0 rgba(255,255,255,.9),
+             0 6px 16px -10px color-mix(in srgb,var(--accent) 60%,transparent)}
+.ttab:focus-visible,.chip:focus-visible,button.run:focus-visible,
+.iconbtn:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+
+/* --- plane 02: the console --- */
+.searchcard{background:var(--spec);box-shadow:var(--lift), var(--rim)}
+input,textarea{background:var(--spec-2);box-shadow:var(--inset-fld)}
+input:focus,textarea:focus{background:var(--surface);
+  box-shadow:0 0 0 3px var(--accent-soft), var(--inset-fld),
+             0 8px 22px -12px color-mix(in srgb,var(--accent) 60%,transparent)}
+select.netsel{background:var(--spec-2);box-shadow:var(--inset-fld)}
+button.run{
+  background:linear-gradient(163deg,color-mix(in srgb,#fff 22%,var(--accent)) 0%,var(--accent) 48%,var(--accent-ink) 100%);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.42), 0 1px 2px rgba(20,17,25,.18),
+             0 10px 24px -10px color-mix(in srgb,var(--accent) 78%,transparent);
+  transition:transform .3s var(--spring), box-shadow .3s var(--spring), filter .3s;
+}
+button.run:hover{transform:translateY(-3px);filter:saturate(1.08) brightness(1.05);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.5), 0 2px 4px rgba(20,17,25,.2),
+             0 22px 42px -12px color-mix(in srgb,var(--accent) 82%,transparent)}
+.chip,.rchip{background:var(--spec-2);box-shadow:var(--shadow-sm), inset 0 1px 0 rgba(255,255,255,.7);
+  transition:transform .26s var(--spring), box-shadow .26s var(--spring), border-color .2s, color .2s}
+.chip:hover,.rchip:hover{transform:translateY(-2px);
+  box-shadow:0 8px 18px -8px color-mix(in srgb,var(--accent) 55%,transparent), inset 0 1px 0 rgba(255,255,255,.8)}
+
+/* --- plane 03: the answer --- */
+.result-card{background:var(--spec);box-shadow:var(--lift), var(--rim)}
+.res-in{animation:rise .58s var(--spring)}
+@keyframes rise{from{opacity:0;transform:translateY(16px) scale(.985)}to{opacity:1;transform:none}}
+
+/* the verdict: severity encoded in form (stripe + bloom), not hue alone */
+.verdict{position:relative;overflow:hidden;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.5), var(--lift)}
+.verdict::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px}
+.verdict .vic{box-shadow:inset 0 1px 0 rgba(255,255,255,.45)}
+.v-red{background:linear-gradient(160deg,color-mix(in srgb,var(--red) 15%,var(--surface)) 0%,var(--red-soft) 100%);
+  border-color:color-mix(in srgb,var(--red) 34%,transparent);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.5), var(--lift),
+             0 0 64px -20px color-mix(in srgb,var(--red) 65%,transparent)}
+.v-red::before{background:linear-gradient(180deg,var(--red),color-mix(in srgb,var(--red) 38%,transparent))}
+.v-amber{background:linear-gradient(160deg,color-mix(in srgb,var(--amber) 15%,var(--surface)) 0%,var(--amber-soft) 100%);
+  border-color:color-mix(in srgb,var(--amber) 34%,transparent);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.5), var(--lift),
+             0 0 64px -20px color-mix(in srgb,var(--amber) 65%,transparent)}
+.v-amber::before{background:linear-gradient(180deg,var(--amber),color-mix(in srgb,var(--amber) 38%,transparent))}
+.v-green{background:linear-gradient(160deg,color-mix(in srgb,var(--green) 15%,var(--surface)) 0%,var(--green-soft) 100%);
+  border-color:color-mix(in srgb,var(--green) 34%,transparent);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.5), var(--lift),
+             0 0 64px -20px color-mix(in srgb,var(--green) 65%,transparent)}
+.v-green::before{background:linear-gradient(180deg,var(--green),color-mix(in srgb,var(--green) 38%,transparent))}
+.v-error::before{background:linear-gradient(180deg,var(--muted),transparent)}
+
+/* --- data surfaces --- */
+.fate{background:linear-gradient(160deg,var(--surface) 0%,var(--surface-2) 100%);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.6), 0 6px 16px -12px rgba(20,17,25,.28)}
+.finding,.risk,.fam,.xr-cell{background:var(--spec-2);
+  box-shadow:var(--shadow-sm), inset 0 1px 0 rgba(255,255,255,.55)}
+.risk,.fam{transition:transform .26s var(--spring), box-shadow .26s var(--spring)}
+.risk:hover,.fam:hover{transform:translateY(-2px);box-shadow:var(--lift), inset 0 1px 0 rgba(255,255,255,.6)}
+.tbl-wrap{background:var(--spec-2);box-shadow:var(--shadow-sm), inset 0 1px 0 rgba(255,255,255,.5)}
+th{background:linear-gradient(160deg,color-mix(in srgb,var(--ink) 5%,var(--surface)),transparent)}
+tbody tr{transition:background .18s}
+tbody tr:hover{background:color-mix(in srgb,var(--accent-soft) 45%,transparent)}
+td,.metric .v,.xr-cell .v,.dial .sc,.gauge .num,.ring .p{font-variant-numeric:tabular-nums}
+
+/* --- charts get the same care as type: lit strokes --- */
+.dial svg,.gauge svg,.ring svg{filter:drop-shadow(0 3px 12px color-mix(in srgb,var(--accent) 28%,transparent))}
+.dial .grade{text-shadow:0 3px 20px color-mix(in srgb,currentColor 45%,transparent)}
+.metric .v,.xr-cell .v{background:linear-gradient(160deg,var(--ink) 0%,color-mix(in srgb,var(--accent) 40%,var(--ink)) 100%);
+  -webkit-background-clip:text;background-clip:text;color:transparent}
+.spin{box-shadow:0 0 22px -6px color-mix(in srgb,var(--accent) 65%,transparent)}
+.ins .node{box-shadow:inset 0 1px 0 rgba(255,255,255,.35),
+  0 4px 10px -5px color-mix(in srgb,var(--ink) 55%,transparent)}
+
+/* --- footer --- */
+footer{background:linear-gradient(180deg,var(--surface-2) 0%,var(--surface-3) 100%);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.5)}
+.foot-links a{background:var(--spec-2);box-shadow:var(--shadow-sm), inset 0 1px 0 rgba(255,255,255,.6);
+  transition:transform .26s var(--spring), border-color .2s, color .2s}
+.foot-links a:hover{transform:translateY(-2px)}
 </style>
 </head>
 <body>

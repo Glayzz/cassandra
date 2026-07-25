@@ -246,6 +246,142 @@ footer{background:var(--ink-band-2);color:var(--ink-text);border-top:1px solid v
   .cmp td.c{width:88px}
   .foot{grid-template-columns:1fr 1fr;gap:26px}
 }
+
+/* ══════════════════════════════════════════════════════════════
+   PREMIUM LAYER
+   Finishing pass over the system above. Surfaces gain a specular
+   gradient and a lit top edge; elevation becomes a ranking rather
+   than a single flat shadow; motion switches to spring easing so
+   hovers read as physical. Tokens and markup are unchanged.
+   ══════════════════════════════════════════════════════════════ */
+:root{
+  --spec:linear-gradient(163deg,#ffffff 0%,#fdfcfa 44%,#f7f5f0 100%);
+  --spec-2:linear-gradient(163deg,#fdfcfa 0%,#f5f3ed 100%);
+  --spec-dark:linear-gradient(163deg,#1d1a28 0%,#17141f 46%,#120f1a 100%);
+  --rim:inset 0 1px 0 rgba(255,255,255,.92), inset 0 0 0 1px rgba(255,255,255,.45);
+  --rim-dark:inset 0 1px 0 rgba(255,255,255,.08), inset 0 0 0 1px rgba(255,255,255,.03);
+  --lift:0 1px 2px rgba(20,17,25,.04), 0 8px 18px -10px rgba(20,17,25,.18),
+         0 28px 56px -28px rgba(20,17,25,.26);
+  --lift-hi:0 2px 4px rgba(20,17,25,.05), 0 14px 28px -12px rgba(20,17,25,.22),
+            0 48px 90px -34px rgba(20,17,25,.34);
+  --bloom:0 0 70px -24px color-mix(in srgb,var(--accent) 62%,transparent);
+  --spring:cubic-bezier(.34,1.4,.5,1);
+}
+
+/* --- chrome: deeper glass, hairline lit edge --- */
+nav{background:color-mix(in srgb,var(--bg) 74%,transparent);
+  backdrop-filter:blur(20px) saturate(1.7);
+  box-shadow:0 1px 0 rgba(255,255,255,.6), 0 6px 24px -18px rgba(20,17,25,.4)}
+.brand .eye circle,.brand .eye .dot{transform-origin:50% 50%;animation:eyebreath 3.2s ease-in-out infinite}
+@keyframes eyebreath{0%,100%{opacity:.85;transform:scale(1)}50%{opacity:1;transform:scale(1.13)}}
+
+/* --- hero: richer atmosphere, moulded preview --- */
+.hero::before{
+  background:
+    radial-gradient(58vw 40vw at 82% -14%, color-mix(in srgb,var(--accent) 16%,transparent), transparent 62%),
+    radial-gradient(50vw 38vw at 0% 4%, color-mix(in srgb,var(--accent-2) 12%,transparent), transparent 56%),
+    radial-gradient(30vw 22vw at 50% 108%, color-mix(in srgb,var(--gold) 10%,transparent), transparent 60%);
+}
+.preview{
+  background:var(--spec);
+  box-shadow:var(--lift-hi), var(--rim);
+  transition:transform .5s var(--spring), box-shadow .5s var(--spring);
+  animation:previseal .8s var(--spring) both .1s;
+}
+@keyframes previseal{from{opacity:0;transform:rotate(.5deg) translateY(22px) scale(.97)}}
+.preview:hover{transform:rotate(0deg) translateY(-6px);box-shadow:var(--lift-hi), var(--rim), var(--bloom)}
+.pv-top{background:linear-gradient(160deg,color-mix(in srgb,var(--ink) 4%,var(--surface)),transparent);
+  box-shadow:inset 0 -1px 0 var(--hair)}
+.pv-verdict{
+  background:linear-gradient(160deg,color-mix(in srgb,var(--red) 14%,var(--surface)) 0%,var(--red-soft) 100%);
+  border-color:color-mix(in srgb,var(--red) 32%,transparent);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.55),
+             0 10px 26px -16px color-mix(in srgb,var(--red) 80%,transparent);
+}
+.pv-fate{background:linear-gradient(160deg,var(--surface) 0%,var(--surface-2) 100%);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.6), 0 6px 16px -12px rgba(20,17,25,.28)}
+
+/* --- buttons: lit from within, spring response --- */
+.btn.primary{
+  background:linear-gradient(163deg,color-mix(in srgb,#fff 22%,var(--accent)) 0%,var(--accent) 48%,var(--accent-ink) 100%);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.42),
+             0 1px 2px rgba(20,17,25,.18),
+             0 10px 24px -10px color-mix(in srgb,var(--accent) 78%,transparent);
+  transition:transform .3s var(--spring), box-shadow .3s var(--spring), filter .3s;
+}
+.btn.primary:hover{transform:translateY(-3px);filter:saturate(1.08) brightness(1.05);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.5), 0 2px 4px rgba(20,17,25,.2),
+             0 22px 42px -12px color-mix(in srgb,var(--accent) 82%,transparent)}
+.btn.ghost{background:var(--spec-2);box-shadow:var(--shadow-sm), inset 0 1px 0 rgba(255,255,255,.8);
+  transition:transform .3s var(--spring), box-shadow .3s var(--spring)}
+.btn.ghost:hover{transform:translateY(-3px);box-shadow:var(--lift), inset 0 1px 0 rgba(255,255,255,.9)}
+.btn:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+
+/* --- stats strip: each cell lit --- */
+.statsrow{box-shadow:var(--lift), var(--rim);border-color:transparent}
+.stat{background:var(--spec);transition:background .3s}
+.stat:hover{background:var(--spec-2)}
+.stat .n{background:linear-gradient(160deg,var(--ink) 0%,color-mix(in srgb,var(--accent) 42%,var(--ink)) 100%);
+  -webkit-background-clip:text;background-clip:text;color:transparent}
+
+/* --- oracle cards: the workhorse surface --- */
+.head{background:var(--spec);box-shadow:var(--lift), var(--rim);
+  transition:transform .38s var(--spring), box-shadow .38s var(--spring), border-color .3s}
+.head::after{content:"";position:absolute;inset:0;pointer-events:none;border-radius:inherit;
+  background:linear-gradient(150deg,rgba(255,255,255,.36) 0%,transparent 36%)}
+.head>*{position:relative;z-index:1}
+.head:hover{transform:translateY(-6px);box-shadow:var(--lift-hi), var(--rim);
+  border-color:color-mix(in srgb,var(--accent) 26%,var(--hair))}
+.head.feature{box-shadow:var(--lift-hi), var(--rim), var(--bloom)}
+.head .ic-wrap{
+  background:linear-gradient(155deg,color-mix(in srgb,var(--accent) 26%,var(--surface)) 0%,var(--accent-soft) 100%);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.6),
+             0 8px 18px -10px color-mix(in srgb,var(--accent) 75%,transparent);
+}
+.mini-dial .g{text-shadow:0 3px 18px color-mix(in srgb,var(--red,#e5484d) 45%,transparent)}
+
+/* --- steps, differentiators, networks, faq --- */
+.step,.diff,.netcard,.faq details{background:var(--spec);box-shadow:var(--lift), var(--rim)}
+.step .n,.diff .di{
+  background:linear-gradient(155deg,color-mix(in srgb,var(--accent) 26%,var(--surface)) 0%,var(--accent-soft) 100%);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.6),
+             0 6px 14px -8px color-mix(in srgb,var(--accent) 70%,transparent);
+}
+.netcard{transition:transform .32s var(--spring), box-shadow .32s var(--spring)}
+.netcard:hover{transform:translateY(-4px);box-shadow:var(--lift-hi), var(--rim)}
+.faq summary:focus-visible{outline:2px solid var(--accent);outline-offset:-2px;border-radius:var(--r)}
+.faq details[open]{box-shadow:var(--lift-hi), var(--rim)}
+
+/* --- comparison table --- */
+.cmp{background:var(--spec);box-shadow:var(--lift), var(--rim)}
+.cmp thead th{background:linear-gradient(160deg,color-mix(in srgb,var(--ink) 5%,var(--surface)),transparent);
+  box-shadow:inset 0 -1px 0 var(--hair)}
+.cmp tbody tr{transition:background .18s}
+.cmp tbody tr:hover{background:color-mix(in srgb,var(--accent-soft) 40%,transparent)}
+.cmp td.us{background:linear-gradient(90deg,
+  color-mix(in srgb,var(--accent-soft) 80%,transparent),
+  color-mix(in srgb,var(--accent-soft) 45%,transparent))}
+
+/* --- dark bands: lit from above, not flat black --- */
+.band-dark{background:
+  radial-gradient(70vw 40vw at 50% -10%, rgba(90,75,224,.16), transparent 62%),
+  var(--ink-band)}
+.prob{background:var(--spec-dark);box-shadow:var(--rim-dark),
+  0 20px 44px -26px rgba(0,0,0,.8);transition:transform .34s var(--spring), box-shadow .34s var(--spring)}
+.prob:hover{transform:translateY(-4px);box-shadow:var(--rim-dark), 0 30px 60px -28px rgba(0,0,0,.9)}
+.code{background:linear-gradient(163deg,#100d18 0%,#0b0910 100%);
+  box-shadow:var(--rim-dark), 0 30px 66px -30px rgba(0,0,0,.9)}
+.cta-band::before{background:
+  radial-gradient(52vw 32vw at 50% -12%, rgba(90,75,224,.34), transparent 62%),
+  radial-gradient(30vw 20vw at 50% 112%, color-mix(in srgb,var(--gold) 22%,transparent), transparent 60%)}
+.cta-band{box-shadow:0 40px 90px -40px rgba(20,17,25,.6), var(--rim-dark)}
+
+/* --- polish --- */
+.pill{background:var(--spec-2);box-shadow:var(--shadow-sm), inset 0 1px 0 rgba(255,255,255,.8)}
+.cbadge{background:var(--spec-2);box-shadow:var(--shadow-sm), inset 0 1px 0 rgba(255,255,255,.75);
+  transition:transform .28s var(--spring), border-color .2s}
+.cbadge:hover{transform:translateY(-2px);border-color:color-mix(in srgb,var(--accent) 45%,transparent)}
+a:focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}
 </style>
 </head>
 <body>
