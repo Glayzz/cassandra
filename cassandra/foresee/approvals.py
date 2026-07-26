@@ -43,7 +43,7 @@ _LOG_SCAN_BUDGET = 9.0
 
 # Wall-clock ceiling for the whole audit, comfortably inside the caller's budget
 # so the oracle degrades on its own terms instead of being cut off mid-flight.
-_AUDIT_BUDGET = 13.0
+_AUDIT_BUDGET = 11.0
 
 
 def _topic_addr(addr: str) -> str:

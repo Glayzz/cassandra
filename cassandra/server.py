@@ -96,6 +96,10 @@ _TOOL_BUDGET = float(os.getenv("TOOL_BUDGET_SECONDS", "22"))
 # point of it. Capped so a long-history wallet still gets its approval audit.
 _POISON_SCAN_BUDGET = 4.0
 
+# The X-Ray's own ceiling, inside the tool budget, so it degrades on its own
+# terms with a usable result rather than being cut off by the outer timeout.
+_XRAY_BUDGET = 15.0
+
 
 class _MissingField(ValueError):
     """A required caller input was not supplied (translated to a clean verdict)."""
@@ -218,7 +222,37 @@ async def _core_scan(wallet, chain, *, track=False) -> dict:
     if net.is_solana:
         res = await wallet_xray_solana(wallet, d.solana, d.prices)
     else:
-        res = await wallet_xray_evm(wallet, net.chain_id, d.etherscan, d.rpc, d.prices, goplus=d.goplus)
+        # The X-Ray is the headline capability, so it must always answer in the
+        # shape it advertises - a score, a grade and a risk list. On a wallet too
+        # large to audit in full it reports reduced coverage; it never collapses
+        # into a bare "unknown", which tells the caller nothing they can use.
+        try:
+            res = await asyncio.wait_for(
+                wallet_xray_evm(wallet, net.chain_id, d.etherscan, d.rpc,
+                                d.prices, goplus=d.goplus),
+                timeout=_XRAY_BUDGET,
+            )
+        except asyncio.TimeoutError:
+            return {
+                "wallet": wallet, "network": "evm", "chain_id": net.chain_id,
+                "safety_score": 50, "grade": "C", "verdict": "yellow",
+                "total_exposure_usd": 0, "open_approvals_count": 0,
+                "degraded": True,
+                "coverage": {"source": "timed_out", "note": (
+                    "This wallet's history is too large to audit completely within the "
+                    "response window, so no approval list was produced. This is missing "
+                    "coverage, not a clean result - re-run the approvals check directly "
+                    "for a partial list.")},
+                "risks": [{
+                    "severity": "info",
+                    "title": "Scan incomplete - coverage is partial",
+                    "detail": ("The wallet has an unusually large transaction history. "
+                               "Treat the absence of findings here as unknown, not safe."),
+                    "items": [],
+                }],
+                "headline": ("This wallet is too large to X-ray fully in one pass - "
+                             "no verdict could be established."),
+            }
         # A poisoned history is a loaded gun that fires the next time the owner
         # copies a recipient from it - worth surfacing even when no approval is
         # open. It is supplementary to the approval audit, though, so it gets a
