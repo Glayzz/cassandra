@@ -30,7 +30,11 @@ _UNLIMITED = (1 << 255)
 
 # Approval(address indexed owner, address indexed spender, uint256 value)
 _APPROVAL_TOPIC0 = "0x" + keccak(b"Approval(address,address,uint256)").hex()
-_MAX_LOG_TOKENS = 40
+# Each entry is one rate-limited explorer query, so this is the dominant cost on
+# wallets with long histories. 24 keeps the whole audit inside the time budget
+# even for the most-transacted addresses on Ethereum; the tokens are taken most
+# recently-touched first, which is where live approvals actually are.
+_MAX_LOG_TOKENS = 24
 
 
 def _topic_addr(addr: str) -> str:
@@ -140,8 +144,12 @@ async def audit_approvals(
     # `Approval` events are still on-chain - read them over RPC instead. The
     # oracle degrades in reach (a recent-block window rather than all history),
     # never in correctness.
+    # Independent reads - issue them together rather than paying two round trips.
     try:
-        tx = await etherscan.erc20_transfers(wallet, chain_id, page=1, offset=500)
+        tx, outbound = await asyncio.gather(
+            etherscan.erc20_transfers(wallet, chain_id, page=1, offset=500),
+            etherscan.txlist(wallet, chain_id, page=1, offset=1000),
+        )
     except EtherscanUnsupportedChain:
         return await _audit_via_logs(wallet, chain_id, rpc, prices, max_pairs)
 
@@ -151,7 +159,6 @@ async def audit_approvals(
     # every contract that ever moved that token via transferFrom on the wallet is a
     # candidate spender. Cheaper alternative: read the wallet's outbound tx list,
     # decode `approve` and `increaseAllowance` calls directly.
-    outbound = await etherscan.txlist(wallet, chain_id, page=1, offset=1000)
 
     candidate_pairs: set[tuple[str, str]] = set()
     tokens_seen: dict[str, dict] = {}
