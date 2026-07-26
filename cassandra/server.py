@@ -92,6 +92,10 @@ else:  # pragma: no cover
 # leaving the caller waiting (the failure mode that got the listing rejected).
 _TOOL_BUDGET = float(os.getenv("TOOL_BUDGET_SECONDS", "22"))
 
+# The address-poisoning history scan is an addition to the wallet X-ray, not the
+# point of it. Capped so a long-history wallet still gets its approval audit.
+_POISON_SCAN_BUDGET = 4.0
+
 
 class _MissingField(ValueError):
     """A required caller input was not supplied (translated to a clean verdict)."""
@@ -216,10 +220,15 @@ async def _core_scan(wallet, chain, *, track=False) -> dict:
     else:
         res = await wallet_xray_evm(wallet, net.chain_id, d.etherscan, d.rpc, d.prices, goplus=d.goplus)
         # A poisoned history is a loaded gun that fires the next time the owner
-        # copies a recipient from it - worth surfacing even when no approval is open.
+        # copies a recipient from it - worth surfacing even when no approval is
+        # open. It is supplementary to the approval audit, though, so it gets a
+        # tight ceiling: it must never be the reason the core scan fails.
         try:
-            traps = await poisoning.scan_history(wallet, net.chain_id, etherscan=d.etherscan)
-        except Exception:
+            traps = await asyncio.wait_for(
+                poisoning.scan_history(wallet, net.chain_id, etherscan=d.etherscan),
+                timeout=_POISON_SCAN_BUDGET,
+            )
+        except (Exception, asyncio.TimeoutError):
             traps = []
         if traps:
             res.setdefault("risks", [])
