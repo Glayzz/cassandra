@@ -82,6 +82,29 @@ class Rpc:
         res = await self.call(chain_id, "eth_call", [{"to": to, "data": data}, "latest"])
         return res  # type: ignore[return-value]
 
+    async def block_number(self, chain_id: int) -> int:
+        res = await self.call(chain_id, "eth_blockNumber", [])
+        return int(res, 16) if isinstance(res, str) else int(res)
+
+    async def get_logs(self, chain_id: int, *, topics: list, from_block: int,
+                       to_block: str | int = "latest",
+                       address: str | None = None) -> list[dict]:
+        """`eth_getLogs` - the RPC route to event history.
+
+        This is the fallback for chains an Etherscan plan doesn't cover: approvals
+        are discoverable from `Approval` events without any explorer API. Public
+        endpoints cap the block span, so callers pass a bounded window.
+        """
+        params: dict = {
+            "fromBlock": hex(from_block) if isinstance(from_block, int) else from_block,
+            "toBlock": hex(to_block) if isinstance(to_block, int) else to_block,
+            "topics": topics,
+        }
+        if address:
+            params["address"] = address
+        res = await self.call(chain_id, "eth_getLogs", [params])
+        return res if isinstance(res, list) else []
+
     async def get_code(self, chain_id: int, address: str) -> str:
         """Runtime bytecode at `address`. "0x" (empty) means it is an EOA, not a
         contract - the single strongest signal that an approval spender is a drainer."""

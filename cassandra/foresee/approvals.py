@@ -15,9 +15,14 @@ from eth_abi import encode as abi_encode
 from eth_hash.auto import keccak
 
 from ..heuristics.addresses import KNOWN_ROUTERS, is_known_drainer, label_for
-from ..chains.etherscan import Etherscan
+from ..chains.etherscan import Etherscan, EtherscanUnsupportedChain
 from ..chains.rpc import Rpc
 from ..chains.prices import Prices
+
+# How far back the RPC fallback looks. Public endpoints reject wide ranges, so
+# this is a deliberate trade: recent coverage that works everywhere, over full
+# history that only works on a paid explorer plan.
+_LOG_WINDOW_BLOCKS = 200_000
 
 
 _UNLIMITED = (1 << 255)
@@ -29,6 +34,90 @@ _MAX_LOG_TOKENS = 40
 
 def _topic_addr(addr: str) -> str:
     return "0x" + addr.lower().replace("0x", "").rjust(64, "0")
+
+
+async def _audit_via_logs(wallet: str, chain_id: int, rpc: Rpc, prices: Prices,
+                          max_pairs: int) -> dict:
+    """Discover approvals from `Approval` logs over RPC, with no explorer at all.
+
+    Used when the Etherscan plan doesn't cover this chain. Same output shape as
+    the explorer path, plus `coverage` so the caller knows this is a window and
+    not the wallet's whole history.
+    """
+    wallet_l = wallet.lower()
+    try:
+        head = await rpc.block_number(chain_id)
+    except Exception:
+        return {
+            "wallet": wallet, "chain_id": chain_id,
+            "open_approvals": [], "total_exposure_usd": 0, "degraded": True,
+            "summary": ("This chain is not readable on the current explorer plan and no "
+                        "RPC endpoint answered, so no approval history could be checked. "
+                        "This is a missing input, not a clean result."),
+        }
+
+    from_block = max(0, head - _LOG_WINDOW_BLOCKS)
+    try:
+        logs = await rpc.get_logs(
+            chain_id,
+            topics=[_APPROVAL_TOPIC0, _topic_addr(wallet_l)],
+            from_block=from_block, to_block="latest",
+        )
+    except Exception:
+        logs = []
+
+    pairs: set[tuple[str, str]] = set()
+    for lg in logs:
+        topics = lg.get("topics") or []
+        if len(topics) < 3:
+            continue
+        token = (lg.get("address") or "").lower()
+        spender = ("0x" + topics[2][-40:]).lower()
+        if token and spender:
+            pairs.add((token, spender))
+
+    coverage = {
+        "source": "rpc_logs", "from_block": from_block, "to_block": "latest",
+        "note": ("This chain is not available on the current explorer plan, so approvals "
+                 f"were read from the last ~{_LOG_WINDOW_BLOCKS:,} blocks of Approval "
+                 "events. Older approvals may exist and are not shown."),
+    }
+    if not pairs:
+        return {
+            "wallet": wallet, "chain_id": chain_id, "open_approvals": [],
+            "total_exposure_usd": 0, "degraded": True, "coverage": coverage,
+            "summary": ("No open approvals found in the scanned window. Coverage on this "
+                        "chain is partial - treat this as 'none found recently', not "
+                        "'none exist'."),
+        }
+
+    rows: list[dict] = []
+    for token, spender in list(pairs)[:max_pairs]:
+        try:
+            allowance = await _read_allowance(rpc, chain_id, token, wallet_l, spender)
+        except Exception:
+            continue
+        if allowance <= 0:
+            continue
+        rows.append({
+            "token": token, "spender": spender,
+            "allowance_raw": str(allowance),
+            "unlimited": allowance >= _UNLIMITED,
+            "spender_label": label_for(spender),
+            "spender_is_known_drainer": is_known_drainer(spender),
+            "exposure_usd": None,
+            "token_symbol": None,
+        })
+
+    rows.sort(key=lambda a: (0 if a["spender_is_known_drainer"] else 1,
+                             0 if a["unlimited"] else 1))
+    return {
+        "wallet": wallet, "chain_id": chain_id,
+        "open_approvals": rows, "total_exposure_usd": 0,
+        "degraded": True, "coverage": coverage,
+        "summary": (f"{len(rows)} open approval(s) found via on-chain events. USD exposure "
+                    "is unavailable on this chain's reduced data path."),
+    }
 
 
 async def audit_approvals(
@@ -46,7 +135,14 @@ async def audit_approvals(
     # `Transfer` fingerprint eventually, but a cheaper proxy: the tokens the wallet
     # has ever touched are the tokens where approvals may exist. This gives us a
     # candidate token list without needing a full log scan.
-    tx = await etherscan.erc20_transfers(wallet, chain_id, page=1, offset=500)
+    # On a plan that doesn't cover this chain the explorer gives us nothing, but
+    # `Approval` events are still on-chain - read them over RPC instead. The
+    # oracle degrades in reach (a recent-block window rather than all history),
+    # never in correctness.
+    try:
+        tx = await etherscan.erc20_transfers(wallet, chain_id, page=1, offset=500)
+    except EtherscanUnsupportedChain:
+        return await _audit_via_logs(wallet, chain_id, rpc, prices, max_pairs)
 
     # Build (token, spender) candidate pairs from historical `approve` calls.
     # Approve emits `Approval(owner, spender, value)` - but etherscan tokentx returns

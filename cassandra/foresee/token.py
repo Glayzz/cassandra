@@ -15,7 +15,7 @@ from typing import Any
 from ..chains.etherscan import Etherscan
 from ..chains.rpc import Rpc
 from ..chains.prices import Prices
-from ..heuristics.addresses import KNOWN_ROUTERS, label_for
+from ..heuristics.addresses import KNOWN_ROUTERS, impersonation_check, label_for
 
 
 # Patterns to grep in verified source. Each is a red flag when present.
@@ -157,12 +157,25 @@ async def analyze_token(
             if not symbol and gp.get("token_symbol"):
                 symbol = gp.get("token_symbol")
 
+    # A token wearing a major token's symbol is lying about what it is. This is
+    # decisive on its own, so it overrides the score rather than nudging it.
+    impostor = impersonation_check(symbol, token, chain_id)
+    if impostor:
+        score = max(score, 90)
+        verdict = "red"
+        reasons.insert(0, impostor["message"])
+        security_badges = list(security_badges) + [{
+            "id": "symbol_impersonation", "level": "danger",
+            "label": f"Not the real {impostor['claimed_symbol']}",
+        }]
+
     return {
         "token": token,
         "chain_id": chain_id,
         "verdict": verdict,
         "risk_score": score,  # 0=safe, 100=guaranteed rug
         "reasons": reasons,
+        "impersonation": impostor,
         "metadata": {
             "name": contract_name,
             "symbol": symbol,

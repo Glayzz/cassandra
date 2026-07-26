@@ -26,6 +26,7 @@ import time
 from typing import Any
 
 from .. import reputation
+from ..chains import sanctions
 from ..heuristics.addresses import KNOWN_ROUTERS, label_for
 
 # Permit2 is legitimate infrastructure but worth naming explicitly: it is both a
@@ -81,11 +82,12 @@ async def profile(
         "Uniswap Permit2" if addr_l == PERMIT2 else None
     )
 
-    # All three probes are independent -> run them together.
-    code, src, rep = await asyncio.gather(
+    # All four probes are independent -> run them together.
+    code, src, rep, ofac = await asyncio.gather(
         _safe(rpc.get_code(chain_id, addr)) if rpc else _safe(_none()),
         _safe(etherscan.get_source(addr, chain_id), {}) if etherscan else _safe(_none(), {}),
         _safe(reputation.check(addr, chain_id, goplus), {}) if goplus else _safe(_none(), {}),
+        _safe(sanctions.is_sanctioned(rpc, chain_id, addr)) if rpc else _safe(_none()),
     )
 
     # --- 1. contract vs EOA -------------------------------------------------
@@ -120,8 +122,17 @@ async def profile(
         out["malicious"] = bool(rep.get("malicious"))
         out["labels"] = rep.get("labels") or []
 
+    # --- 3b. sanctions (authoritative, and its own category of problem) -----
+    out["sanctioned"] = ofac if isinstance(ofac, bool) else None
+    if out["sanctioned"] is None:
+        out["unknown"].append("sanctioned")
+
     # --- 4. turn observations into ranked signals ---------------------------
     sev = "info"
+
+    if out["sanctioned"]:
+        sev = "critical"
+        out["signals"].append(sanctions.finding(addr))
 
     if out["malicious"]:
         sev = "critical"
@@ -248,9 +259,14 @@ def apply_to_result(result: dict, prof: dict) -> dict:
             result["fates"].insert(
                 0, f"{who} was created {prof['age_days']} day(s) ago - do not sign.")
 
+    if prof.get("sanctioned"):
+        result["verdict"] = "red"
+        result.setdefault("fates", []).insert(
+            0, f"{prof['address']} is OFAC-sanctioned. Do not sign this.")
+
     result.setdefault("intel", {})["counterparty"] = {
         k: prof.get(k) for k in
         ("address", "role", "is_contract", "is_verified", "age_days",
-         "trusted_label", "malicious", "labels", "severity", "unknown")
+         "trusted_label", "malicious", "labels", "sanctioned", "severity", "unknown")
     }
     return result

@@ -158,6 +158,33 @@ async def analyze_calldata(
 
     decoded = _decode_selector(selector, arg_bytes)
     if not decoded or not decoded.get("known"):
+        # Before treating this as merely unrecognised, check whether the function
+        # NAME is one of the pretexts drainers use. This fires on contracts no
+        # feed has seen, because it keys off the lure rather than the address.
+        lure = S.lure_name(selector)
+        if lure:
+            severity_max = _worse(severity_max, "critical")
+            findings.append({
+                "kind": "drainer_lure_function",
+                "severity": "critical",
+                "message": (
+                    f"This calls `{lure}` on {to_norm}. No token, DEX or NFT standard "
+                    "defines that function - it exists to give a phishing page a "
+                    "plausible button to press. Contracts exposing it are overwhelmingly "
+                    "wallet drainers."
+                ),
+            })
+            fates.append(
+                f"`{lure}` is a phishing pretext, not a real protocol action. "
+                "Whatever it does, you did not intend it - reject this."
+            )
+            return _final(
+                summary=f"`{lure}` on {to_norm} - a known wallet-drainer pretext.",
+                fates=fates, findings=findings, verdict="red",
+                target={"address": to_norm, "label": contract_label},
+                operation={"name": lure, "type": "drainer_lure", "selector": selector},
+            )
+
         # unknown selector - not necessarily bad, but user should know
         findings.append({
             "kind": "unknown_selector",
@@ -217,6 +244,33 @@ async def analyze_calldata(
 
     meta = decoded["meta"]
     op_type = meta["type"]
+
+    # The selector is recognised but its arguments did not decode - truncated,
+    # padded wrong, or deliberately malformed. Every branch below indexes into
+    # `args`, so bail out here with a verdict instead of raising: calldata comes
+    # from whoever is asking for the signature, and a hostile caller must not be
+    # able to turn bad input into a crash.
+    if meta.get("abi") is not None and decoded.get("args") is None:
+        severity_max = _worse(severity_max, "high")
+        findings.append({
+            "kind": "malformed_calldata",
+            "severity": "high",
+            "message": (
+                f"This call claims to be `{meta['name']}` but its arguments do not "
+                "decode against that function's signature"
+                + (f" ({decoded['decode_error']})." if decoded.get("decode_error") else ".")
+                + " Cassandra cannot tell you what it would do, and a wallet cannot "
+                "either. Malformed arguments on a recognised selector are a common "
+                "way to slip past naive decoders."
+            ),
+        })
+        return _final(
+            summary=f"`{meta['name']}` on {to_norm} with undecodable arguments.",
+            fates=fates or ["The effect of this call cannot be determined. Do not sign it."],
+            findings=findings, verdict=_color(severity_max),
+            target={"address": to_norm, "label": contract_label},
+            operation={"name": meta["name"], "type": "malformed", "selector": selector},
+        )
 
     # ---- Case analysis ----
     if op_type == "token_approve":
@@ -416,15 +470,28 @@ async def analyze_calldata(
 
     if op_type == "token_transfer":
         args = decoded["args"]
+        recipient = _to_addr(args["recipient"])
+        amount = int(args["amount"])
         token_meta = await _token_metadata(rpc, chain_id, to_norm) if rpc else {}
         symbol = token_meta.get("symbol"); decimals = token_meta.get("decimals")
+        pretty = _format_amount(amount, decimals, symbol)
+
+        # Destinations that burn the funds with no way back.
+        burn = _burn_destination(recipient, token_contract=to_norm, symbol=symbol)
+        if burn:
+            findings.append(burn)
+            severity_max = _worse(severity_max, "critical")
+            fates.append(burn["fate"])
+
         return _final(
-            summary=(f"ERC-20 transfer of {_format_amount(int(args['amount']), decimals, symbol)} "
-                     f"to {_to_addr(args['recipient'])}"),
-            fates=[f"{_format_amount(int(args['amount']), decimals, symbol)} leaves your wallet."],
-            findings=findings, verdict="green",
+            summary=f"ERC-20 transfer of {pretty} to {recipient}",
+            fates=fates or [f"{pretty} leaves your wallet."],
+            findings=findings, verdict=_color(severity_max),
             target={"address": to_norm, "label": symbol or contract_label, "kind": "erc20_token"},
-            operation={"name": "transfer", "type": op_type},
+            # `recipient` is exposed so the counterparty and address-poisoning
+            # checks downstream have something to inspect.
+            operation={"name": "transfer", "type": op_type, "recipient": recipient,
+                       "amount": str(amount), "token": to_norm, "symbol": symbol},
         )
 
     # Generic decoded case
@@ -435,6 +502,49 @@ async def analyze_calldata(
         target={"address": to_norm, "label": contract_label},
         operation={"name": meta["name"], "type": op_type, "args": _stringify_args(decoded["args"])},
     )
+
+
+# ---- irreversible destinations ----
+
+_ZERO = "0x" + "0" * 40
+_DEAD = "0x000000000000000000000000000000000000dead"
+
+
+def _burn_destination(recipient: str, *, token_contract: str | None = None,
+                      symbol: str | None = None) -> dict | None:
+    """Flag transfers whose destination destroys the funds.
+
+    None of these revert - the transaction succeeds and the money is simply gone,
+    which is why they belong in a pre-loss oracle rather than a linter.
+    """
+    r = (recipient or "").lower()
+    name = symbol or "these tokens"
+
+    if r == _ZERO:
+        return {
+            "kind": "transfer_to_zero_address", "severity": "critical",
+            "message": ("The recipient is the zero address. This transaction will "
+                        "succeed and the tokens will be permanently destroyed."),
+            "fate": f"{name} are burned forever - this cannot be undone.",
+        }
+    if r == _DEAD:
+        return {
+            "kind": "transfer_to_burn_address", "severity": "critical",
+            "message": ("The recipient is the standard burn address (0x…dEaD). The "
+                        "tokens will be permanently destroyed."),
+            "fate": f"{name} are burned forever - this cannot be undone.",
+        }
+    if token_contract and r == token_contract.lower():
+        return {
+            "kind": "transfer_to_token_contract", "severity": "critical",
+            "message": (
+                "The recipient is the token's own contract address. Sending a token "
+                "to itself is one of the most common irreversible mistakes - almost "
+                "no token implements a way to recover it."
+            ),
+            "fate": f"{name} are almost certainly unrecoverable.",
+        }
+    return None
 
 
 # ---- multicall unwrapping ----

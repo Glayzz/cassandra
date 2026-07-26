@@ -62,28 +62,94 @@ KNOWN_ROUTERS: dict[str, str] = {
     "0x6b175474e89094c44da98b954eedeac495271d0f": "DAI",
 }
 
-# Addresses with public, documented theft history. This list is deliberately
-# short and real: every entry is a well-attested sanctioned mixer or a widely
-# reported drainer/exploiter address, not a placeholder.
+# Deliberately small. Sanctions screening is NOT done here - it is a live
+# `isSanctioned` call against the Chainalysis on-chain oracle (see
+# `chains.sanctions`), which tracks OFAC designations as they change.
 #
-# It is a fast local pre-filter ONLY. Live coverage of rotating drainer
-# infrastructure comes from GoPlus (`reputation.check`), and addresses that no
-# feed knows yet are caught structurally by `foresee.counterparty`.
-KNOWN_DRAINERS: set[str] = {
-    # OFAC-sanctioned Tornado Cash router/pools - funds routed here are being
-    # laundered; an approval to any of them is never legitimate for a normal user.
-    "0xd90e2f925da726b50c4ed8d0fb90ad053324f31b",  # Tornado Cash Router
-    "0x8589427373d6d84e98730d7795d8f6f8731fda16",  # Tornado Cash: Donate
-    "0x722122df12d4e14e13ac3b6895a86e84145b6967",  # Tornado Cash: Proxy
-    "0xdd4c48c0b24039969fc16d1cdf626eab821d3384",  # Tornado Cash: 0.1 ETH
-    "0x910cbd523d972eb0a6f4cae4618ad62622b39dbf",  # Tornado Cash: 10 ETH
-    "0xa160cdab225685da1d56aa342ad8841c3b53f291",  # Tornado Cash: 100 ETH
-    # Lazarus / DPRK-attributed addresses named in OFAC designations
-    "0x098b716b8aaf21512996dc57eb0615e2383e2f96",
-    "0x3cffd56b47b7b41c56258d9c7731abadc360e073",
-    # Ronin bridge exploiter (DPRK-attributed)
-    "0x098b716b8aaf21512996dc57eb0615e2383e2f96",
+# Keeping designations in source is actively harmful: Tornado Cash was hardcoded
+# here until the oracle reported it clean, because OFAC delisted it in March 2025.
+# A stale local list produces confident false accusations, which is the one thing
+# a security oracle cannot afford.
+#
+# What remains here are non-sanctions entries: addresses with public, documented
+# theft history that no feed covers. Live coverage of rotating drainer
+# infrastructure comes from GoPlus (`reputation.check`), sanctions from the
+# on-chain oracle, and everything nobody has seen yet from the structural checks
+# in `foresee.counterparty`.
+KNOWN_DRAINERS: set[str] = set()
+
+
+# The real address of each heavily-impersonated symbol, per chain. A token that
+# calls itself USDC while living at a different address is claiming to be money
+# it is not - one of the cheapest scams to run and, with this table, one of the
+# cheapest to catch.
+CANONICAL_TOKENS: dict[int, dict[str, str]] = {
+    1: {  # Ethereum
+        "USDC": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "USDT": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+        "DAI": "0x6b175474e89094c44da98b954eedeac495271d0f",
+        "WETH": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "WBTC": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+        "LINK": "0x514910771af9ca656af840dff83e8264ecf986ca",
+        "UNI": "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984",
+        "AAVE": "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9",
+        "PEPE": "0x6982508145454ce325ddbe47a25d4ec3d2311933",
+        "SHIB": "0x95ad61b0a150d79219dcf64e1e6cc01f0b64c4ce",
+    },
+    8453: {  # Base
+        "USDC": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+        "WETH": "0x4200000000000000000000000000000000000006",
+        "DAI": "0x50c5725949a6f0c72e6c4a641f24049a917db0cb",
+    },
+    42161: {  # Arbitrum
+        "USDC": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+        "USDT": "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9",
+        "WETH": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+        "ARB": "0x912ce59144191c1204e64559fe8253a0e49e6548",
+    },
+    10: {  # Optimism
+        "USDC": "0x0b2c639c533813f4aa9d7837caf62653d097ff85",
+        "WETH": "0x4200000000000000000000000000000000000006",
+        "OP": "0x4200000000000000000000000000000000000042",
+    },
+    137: {  # Polygon
+        "USDC": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+        "USDT": "0xc2132d05d31c914a87c6611c10748aeb04b58e8f",
+        "WETH": "0x7ceb23fd6bc0add59e62ac25578270cff1b9f619",
+    },
+    56: {  # BNB Chain
+        "USDT": "0x55d398326f99059ff775485246999027b3197955",
+        "USDC": "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d",
+        "WBNB": "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c",
+    },
 }
+
+
+def impersonation_check(symbol: str | None, address: str, chain_id: int) -> dict | None:
+    """Does this token claim a symbol that belongs to a different, real token?
+
+    Returns a finding, or None when the symbol is unknown or the address is the
+    genuine one. Unknown symbols are not suspicious - most tokens are new.
+    """
+    if not symbol or not address:
+        return None
+    canon = CANONICAL_TOKENS.get(chain_id, {})
+    real = canon.get(str(symbol).strip().upper())
+    if not real:
+        return None
+    if address.lower() == real:
+        return None
+    return {
+        "kind": "symbol_impersonation",
+        "severity": "critical",
+        "message": (
+            f"This contract calls itself `{symbol}`, but the real {symbol} on this "
+            f"chain is {real}. This token is not {symbol} - it borrowed the name so "
+            "wallets and price widgets display something you already trust."
+        ),
+        "claimed_symbol": str(symbol),
+        "real_address": real,
+    }
 
 
 def normalize(addr: str) -> str | None:

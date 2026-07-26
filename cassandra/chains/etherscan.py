@@ -11,13 +11,26 @@ import asyncio
 from typing import Any
 
 import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential_jitter
+from tenacity import (retry, retry_if_exception_type, stop_after_attempt,
+                      wait_exponential_jitter)
 
 from ..config import get_settings
 
 
 class EtherscanError(RuntimeError):
     pass
+
+
+class EtherscanUnsupportedChain(EtherscanError):
+    """This chain is not available on the current API plan.
+
+    Permanent for the life of the key, so callers should degrade to an
+    RPC-only path rather than retrying.
+    """
+
+
+class EtherscanRateLimited(EtherscanError):
+    """Transient - worth a retry."""
 
 
 class Etherscan:
@@ -30,14 +43,25 @@ class Etherscan:
         self._client = client or httpx.AsyncClient(
             timeout=httpx.Timeout(9.0, connect=4.0, read=8.0)
         )
-        # crude rate limiter: 4 rps to stay under 5 rps free tier
-        self._sem = asyncio.Semaphore(4)
+        # The documented free-tier ceiling is 5 rps, but the API actually enforces
+        # 3/sec ("Max calls per sec rate limit reached (3/sec)"). Two in flight
+        # keeps us under it; going wider produces errors we then have to retry,
+        # which is slower than being polite in the first place.
+        self._sem = asyncio.Semaphore(2)
+        # Chains this key has already told us it cannot serve. Checked before
+        # every request so we fail instantly instead of burning the budget.
+        self._unsupported: set[int] = set()
 
     async def close(self) -> None:
         await self._client.aclose()
 
-    @retry(stop=stop_after_attempt(2), wait=wait_exponential_jitter(initial=0.3, max=1.5))
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential_jitter(initial=0.3, max=1.5),
+           retry=retry_if_exception_type(EtherscanRateLimited))
     async def _get(self, params: dict[str, Any]) -> Any:
+        chain_id = params.get("chainid")
+        if chain_id in self._unsupported:
+            raise EtherscanUnsupportedChain(
+                f"chain {chain_id} is not available on this Etherscan plan")
         params = {**params, "apikey": self._key}
         async with self._sem:
             r = await self._client.get(self._base, params=params)
@@ -57,11 +81,24 @@ class Etherscan:
         # No records for a valid query returns status=0 message="No transactions found"
         msg = str(data.get("message", "")).lower()
         result = data.get("result")
+        blob = f"{msg} {result}".lower()
         if "no" in msg and ("transactions" in msg or "records" in msg or "found" in msg):
             return [] if isinstance(result, list) else result
-        # rate limit? bubble up so tenacity retries
-        if "rate limit" in msg or "max rate" in str(result).lower():
-            raise EtherscanError(f"rate limited: {msg} / {result}")
+
+        # Plan limitation: this key cannot read this chain, ever. Remember it so
+        # later calls short-circuit, and raise a distinct type so callers can
+        # degrade to RPC instead of reporting a generic failure.
+        if "not supported for this chain" in blob or "upgrade your api" in blob:
+            if chain_id is not None:
+                self._unsupported.add(chain_id)
+            raise EtherscanUnsupportedChain(
+                f"chain {chain_id} is not available on this Etherscan plan")
+
+        # Transient: worth exactly one retry. The live message is
+        # "Max calls per sec rate limit reached (3/sec)", which lives in `result`.
+        if "rate limit" in blob or "max rate" in blob or "too many request" in blob:
+            raise EtherscanRateLimited(f"rate limited: {msg} / {result}")
+
         # otherwise it's a real error
         raise EtherscanError(f"etherscan error: {msg} / {result}")
 

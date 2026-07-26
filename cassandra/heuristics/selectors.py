@@ -172,3 +172,28 @@ SELECTORS: dict[str, dict] = {
 
 
 UINT256_MAX = (1 << 256) - 1
+
+
+# --- Drainer lure functions ---------------------------------------------------
+# Phishing sites need the victim to press one button, so their contracts expose an
+# entry point whose *name* supplies the pretext: "SecurityUpdate", "ClaimRewards",
+# "Connect". These names are not part of any token, DEX or NFT standard - a real
+# protocol has no reason to expose them - and several are capitalised, which
+# ordinary Solidity style never does for functions. Matching on the name alone
+# catches a freshly deployed drainer that no blocklist has seen.
+_LURE_SIGNATURES = [
+    "SecurityUpdate()", "securityUpdate()",
+    "Claim()", "claim()", "ClaimRewards()", "claimRewards()",
+    "ClaimAirdrop()", "claimAirdrop()", "Airdrop()",
+    "Connect()", "connect()", "ConnectWallet()", "connectWallet()",
+    "Verify()", "verify()", "Validate()", "Confirm()",
+    "Swap()", "Enable()", "Activate()", "Migrate()",
+    "GetReward()", "getReward()", "Claimrewards()",
+]
+
+DRAINER_LURES: dict[str, str] = {sel(sig): sig for sig in _LURE_SIGNATURES}
+
+
+def lure_name(selector: str) -> str | None:
+    """The drainer-lure function this selector corresponds to, if any."""
+    return DRAINER_LURES.get((selector or "").lower())
