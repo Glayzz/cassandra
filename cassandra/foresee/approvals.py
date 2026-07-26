@@ -10,6 +10,7 @@ Because if you have $500 of USDC and an unlimited approval, the drainer can only
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 from eth_abi import encode as abi_encode
@@ -38,7 +39,11 @@ _MAX_LOG_TOKENS = 24
 
 # Ceiling for the rate-limit-bound log-scan phase. Chosen to leave room for the
 # allowance reads and pricing that follow inside a ~22s tool budget.
-_LOG_SCAN_BUDGET = 11.0
+_LOG_SCAN_BUDGET = 9.0
+
+# Wall-clock ceiling for the whole audit, comfortably inside the caller's budget
+# so the oracle degrades on its own terms instead of being cut off mid-flight.
+_AUDIT_BUDGET = 15.0
 
 
 def _topic_addr(addr: str) -> str:
@@ -139,6 +144,7 @@ async def audit_approvals(
 ) -> dict:
     """Return every non-zero ERC-20 allowance held by `wallet` on `chain_id`."""
     wallet_l = wallet.lower()
+    _started = time.monotonic()
 
     # 1. Pull ERC-20 transfers this wallet has been part of. Each APPROVAL leaves a
     # `Transfer` fingerprint eventually, but a cheaper proxy: the tokens the wallet
@@ -243,18 +249,34 @@ async def audit_approvals(
     pairs = list(candidate_pairs)[:max_pairs]
 
     # Every allowance is an independent eth_call, so read them all at once
-    # rather than paying one round-trip of latency per pair.
+    # rather than paying one round-trip of latency per pair. Bounded by whatever
+    # is left of the audit's budget, keeping the reads that did finish - a
+    # partial list is useful, a timeout is not.
     async def _allowance_or_none(tok: str, spd: str):
         try:
             return await _read_allowance(rpc, chain_id, tok, wallet_l, spd)
         except Exception:
             return None
 
-    allowances = await asyncio.gather(
-        *(_allowance_or_none(t, s) for t, s in pairs))
+    tasks = {asyncio.ensure_future(_allowance_or_none(t, s)): (t, s) for t, s in pairs}
+    remaining = max(2.0, _AUDIT_BUDGET - (time.monotonic() - _started))
+    done, pending = await asyncio.wait(tasks.keys(), timeout=remaining)
+    for p in pending:
+        p.cancel()
+    if pending:
+        log_scan_complete = False
+
+    allowances_by_pair: dict[tuple[str, str], int] = {}
+    for t in done:
+        try:
+            val = t.result()
+        except Exception:
+            continue
+        if isinstance(val, int) and val > 0:
+            allowances_by_pair[tasks[t]] = val
 
     open_allowances: list[dict] = []
-    for (token, spender), allowance in zip(pairs, allowances):
+    for (token, spender), allowance in allowances_by_pair.items():
         if not allowance or allowance <= 0:
             continue
         meta = tokens_seen.get(token, {})
