@@ -9,6 +9,7 @@ Because if you have $500 of USDC and an unlimited approval, the drainer can only
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from eth_abi import encode as abi_encode
@@ -182,14 +183,22 @@ async def audit_approvals(
     # routers/aggregators and approvals older than the recent txlist window - the
     # cases the outbound-selector scan above misses. This is what makes coverage
     # match dedicated revoke tools rather than a best-effort guess.
-    for token in list(tokens_seen.keys())[:_MAX_LOG_TOKENS]:
+    # Fetched concurrently. The client's own semaphore still holds us to the
+    # provider's rate limit - gathering just stops the pipe going idle between
+    # requests, which is what pushed heavy wallets past the time budget.
+    log_tokens = list(tokens_seen.keys())[:_MAX_LOG_TOKENS]
+
+    async def _logs_for(tok: str):
         try:
-            logs = await etherscan.get_logs(
-                chain_id, address=token, topic0=_APPROVAL_TOPIC0,
+            return await etherscan.get_logs(
+                chain_id, address=tok, topic0=_APPROVAL_TOPIC0,
                 topic1=_topic_addr(wallet_l), offset=100,
             )
         except Exception:
-            logs = []
+            return []
+
+    for token, logs in zip(log_tokens,
+                           await asyncio.gather(*(_logs_for(t) for t in log_tokens))):
         for lg in logs or []:
             topics = lg.get("topics") or []
             if len(topics) < 3:
@@ -209,13 +218,20 @@ async def audit_approvals(
     # to protect the free-tier budget - real deploy would page.
     pairs = list(candidate_pairs)[:max_pairs]
 
-    open_allowances: list[dict] = []
-    for token, spender in pairs:
+    # Every allowance is an independent eth_call, so read them all at once
+    # rather than paying one round-trip of latency per pair.
+    async def _allowance_or_none(tok: str, spd: str):
         try:
-            allowance = await _read_allowance(rpc, chain_id, token, wallet_l, spender)
+            return await _read_allowance(rpc, chain_id, tok, wallet_l, spd)
         except Exception:
-            continue
-        if allowance <= 0:
+            return None
+
+    allowances = await asyncio.gather(
+        *(_allowance_or_none(t, s) for t, s in pairs))
+
+    open_allowances: list[dict] = []
+    for (token, spender), allowance in zip(pairs, allowances):
+        if not allowance or allowance <= 0:
             continue
         meta = tokens_seen.get(token, {})
         if not meta.get("symbol"):
