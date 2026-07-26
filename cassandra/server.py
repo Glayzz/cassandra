@@ -100,6 +100,9 @@ _POISON_SCAN_BUDGET = 4.0
 # terms with a usable result rather than being cut off by the outer timeout.
 _XRAY_BUDGET = 15.0
 
+# Reputation lookups decorate a result that is already valid without them.
+_ENRICH_BUDGET = 6.0
+
 
 class _MissingField(ValueError):
     """A required caller input was not supplied (translated to a clean verdict)."""
@@ -181,6 +184,18 @@ async def _core_signature(chain, to, data, value_wei, typed_data, tx, expected,
     return res
 
 
+async def _enrich(coro, seconds: float, fallback):
+    """Run a supplementary enrichment, or give up and keep the core result.
+
+    Enrichments add labels to an answer that is already correct without them, so
+    none of them is ever allowed to be the reason a call returns nothing.
+    """
+    try:
+        return await asyncio.wait_for(coro, timeout=seconds)
+    except (Exception, asyncio.TimeoutError):
+        return fallback
+
+
 async def _core_approvals(wallet, chain) -> dict:
     net = resolve(chain)
     d = get_deps()
@@ -190,7 +205,9 @@ async def _core_approvals(wallet, chain) -> dict:
         wallet=wallet, chain_id=net.chain_id,
         etherscan=d.etherscan, rpc=d.rpc, prices=d.prices,
     )
-    return await reputation.enrich_approvals(res, net.chain_id, d.goplus)
+    return await _enrich(
+        reputation.enrich_approvals(res, net.chain_id, d.goplus),
+        _ENRICH_BUDGET, res)
 
 
 async def _core_token(token, chain, family_depth=8, *, track=False) -> dict:
