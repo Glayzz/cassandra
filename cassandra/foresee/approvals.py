@@ -36,6 +36,10 @@ _APPROVAL_TOPIC0 = "0x" + keccak(b"Approval(address,address,uint256)").hex()
 # recently-touched first, which is where live approvals actually are.
 _MAX_LOG_TOKENS = 24
 
+# Ceiling for the rate-limit-bound log-scan phase. Chosen to leave room for the
+# allowance reads and pricing that follow inside a ~22s tool budget.
+_LOG_SCAN_BUDGET = 11.0
+
 
 def _topic_addr(addr: str) -> str:
     return "0x" + addr.lower().replace("0x", "").rjust(64, "0")
@@ -204,8 +208,21 @@ async def audit_approvals(
         except Exception:
             return []
 
-    for token, logs in zip(log_tokens,
-                           await asyncio.gather(*(_logs_for(t) for t in log_tokens))):
+    # This phase is rate-limit bound, so on a wallet with a very long history it
+    # can outlast the caller's budget. Cap it: whatever has completed by the
+    # deadline is used, and the shortfall is reported. A partial answer the user
+    # can act on beats a timeout that tells them nothing.
+    log_scan_complete = True
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*(_logs_for(t) for t in log_tokens)),
+            timeout=_LOG_SCAN_BUDGET,
+        )
+    except asyncio.TimeoutError:
+        log_scan_complete = False
+        results = []
+
+    for token, logs in zip(log_tokens, results):
         for lg in logs or []:
             topics = lg.get("topics") or []
             if len(topics) < 3:
@@ -325,7 +342,7 @@ async def audit_approvals(
         + (f"{len(unlimited)} unlimited approvals to unlabeled contracts." if unlimited else "")
     )
 
-    return {
+    out = {
         "wallet": wallet,
         "chain_id": chain_id,
         "open_approvals": open_allowances,
@@ -333,6 +350,19 @@ async def audit_approvals(
         "candidate_pairs_examined": len(pairs),
         "summary": summary,
     }
+    if not log_scan_complete:
+        # Under-reporting silently would be the dangerous failure here: a short
+        # list would read as a clean wallet.
+        out["degraded"] = True
+        out["coverage"] = {
+            "source": "partial",
+            "note": ("This wallet has a large history and the event scan hit its time "
+                     "limit, so approvals were derived from recent transactions only. "
+                     "Other approvals may exist - treat this as an incomplete list, "
+                     "not an all-clear."),
+        }
+        out["summary"] = "Partial scan. " + summary
+    return out
 
 
 # ---- On-chain reads ----
