@@ -103,6 +103,9 @@ _XRAY_BUDGET = 15.0
 # Reputation lookups decorate a result that is already valid without them.
 _ENRICH_BUDGET = 6.0
 
+# Ceiling for the approval audit as a whole, leaving room for the enrichment.
+_APPROVALS_BUDGET = 14.0
+
 
 class _MissingField(ValueError):
     """A required caller input was not supplied (translated to a clean verdict)."""
@@ -201,10 +204,28 @@ async def _core_approvals(wallet, chain) -> dict:
     d = get_deps()
     if net.is_solana:
         return await audit_solana_approvals(wallet, d.solana, d.prices)
-    res = await audit_approvals(
-        wallet=wallet, chain_id=net.chain_id,
-        etherscan=d.etherscan, rpc=d.rpc, prices=d.prices,
-    )
+    # Guaranteed at the boundary rather than per-phase: whatever the audit does
+    # internally, this call returns an approvals-shaped answer. A wallet too
+    # large to enumerate gets an explicit "coverage unknown", never a bare error
+    # and never an empty list that would read as "nothing is open".
+    try:
+        res = await asyncio.wait_for(
+            audit_approvals(wallet=wallet, chain_id=net.chain_id,
+                            etherscan=d.etherscan, rpc=d.rpc, prices=d.prices),
+            timeout=_APPROVALS_BUDGET,
+        )
+    except asyncio.TimeoutError:
+        return {
+            "wallet": wallet, "chain_id": net.chain_id,
+            "open_approvals": [], "total_exposure_usd": 0,
+            "degraded": True,
+            "coverage": {"source": "timed_out", "note": (
+                "This wallet's history is too large to enumerate within the response "
+                "window. No approval list was produced - this is missing coverage, not "
+                "an empty one. Open approvals may well exist.")},
+            "summary": ("Could not enumerate approvals for this wallet in time. Do not "
+                        "read this as 'no open approvals'."),
+        }
     return await _enrich(
         reputation.enrich_approvals(res, net.chain_id, d.goplus),
         _ENRICH_BUDGET, res)
