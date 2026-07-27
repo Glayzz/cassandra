@@ -105,32 +105,71 @@ async def _audit_via_logs(wallet: str, chain_id: int, rpc: Rpc, prices: Prices,
                         "'none exist'."),
         }
 
-    rows: list[dict] = []
-    for token, spender in list(pairs)[:max_pairs]:
+    selected = list(pairs)[:max_pairs]
+
+    async def _safe(coro, default=None):
         try:
-            allowance = await _read_allowance(rpc, chain_id, token, wallet_l, spender)
+            return await coro
         except Exception:
-            continue
-        if allowance <= 0:
-            continue
+            return default
+
+    allowances = await asyncio.gather(
+        *(_safe(_read_allowance(rpc, chain_id, t, wallet_l, s), 0) for t, s in selected))
+    live = [(t, s, a) for (t, s), a in zip(selected, allowances) if a and a > 0]
+    if not live:
+        return {
+            "wallet": wallet, "chain_id": chain_id, "open_approvals": [],
+            "total_exposure_usd": 0, "degraded": True, "coverage": coverage,
+            "summary": ("No live approvals found in the scanned window. Coverage on this "
+                        "chain is partial - read this as 'none found recently'."),
+        }
+
+    # Everything needed to price exposure is available without an explorer:
+    # metadata and balances come from the token contracts, prices from DeFiLlama.
+    tokens = sorted({t for t, _, _ in live})
+    metas, balances, pmap = await asyncio.gather(
+        asyncio.gather(*(_safe(_read_token_meta(rpc, chain_id, t), {}) for t in tokens)),
+        asyncio.gather(*(_safe(_read_balance(rpc, chain_id, t, wallet_l), 0) for t in tokens)),
+        _safe(prices.usd_prices([(chain_id, t) for t in tokens]), {}),
+    )
+    meta_by = dict(zip(tokens, metas))
+    bal_by = dict(zip(tokens, balances))
+
+    rows: list[dict] = []
+    total = 0.0
+    for token, spender, allowance in live:
+        meta = meta_by.get(token) or {}
+        decimals = meta.get("decimals")
+        price = (pmap or {}).get(token)
+        balance = bal_by.get(token) or 0
+        exposure = None
+        if price is not None and decimals is not None:
+            # Capped at the balance: an unlimited allowance can still only take
+            # what is actually there.
+            reachable = min(allowance, balance)
+            exposure = round((reachable / (10 ** decimals)) * price, 2)
+            total += exposure
         rows.append({
             "token": token, "spender": spender,
             "allowance_raw": str(allowance),
             "unlimited": allowance >= _UNLIMITED,
             "spender_label": label_for(spender),
             "spender_is_known_drainer": is_known_drainer(spender),
-            "exposure_usd": None,
-            "token_symbol": None,
+            "exposure_usd": exposure,
+            "token_symbol": meta.get("symbol"),
+            "token_decimals": decimals,
         })
 
     rows.sort(key=lambda a: (0 if a["spender_is_known_drainer"] else 1,
+                             -(a["exposure_usd"] or 0),
                              0 if a["unlimited"] else 1))
     return {
         "wallet": wallet, "chain_id": chain_id,
-        "open_approvals": rows, "total_exposure_usd": 0,
+        "open_approvals": rows, "total_exposure_usd": round(total, 2),
         "degraded": True, "coverage": coverage,
-        "summary": (f"{len(rows)} open approval(s) found via on-chain events. USD exposure "
-                    "is unavailable on this chain's reduced data path."),
+        "summary": (f"{len(rows)} open approval(s) found via on-chain events, "
+                    f"~${total:,.2f} live USD exposure. History coverage on this chain is "
+                    "limited to the scanned window."),
     }
 
 

@@ -577,11 +577,14 @@ async def stats():
         # approvals come from an RPC log window rather than full history - say so
         # rather than implying every chain is equally well covered.
         "coverage": {
-            "full": ["ethereum", "arbitrum", "polygon", "solana"],
-            "rpc_fallback": ["base", "optimism", "bsc"],
-            "note": ("Chains on the RPC fallback are read from on-chain events over a "
-                     "recent block window; older approvals may not appear."),
+            "full": ["ethereum", "arbitrum", "polygon", "base", "optimism", "solana"],
+            "rpc_fallback": ["bsc"],
+            "note": ("Base and Optimism are served by Blockscout; BNB Chain falls back to "
+                     "on-chain events over a recent block window, so older approvals there "
+                     "may not appear. Live USD exposure is priced on every chain."),
         },
+        "explorers": {"etherscan_v2": ["ethereum", "arbitrum", "polygon"],
+                      "blockscout": ["base", "optimism"]},
         "sanctions_screening": sorted(_SANCTION_CHAINS),
         "features": [
             "eip712_signature_analysis", "lighthouse_shield", "approval_log_scan",

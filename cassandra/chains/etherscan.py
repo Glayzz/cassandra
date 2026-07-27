@@ -17,6 +17,16 @@ from tenacity import (retry, retry_if_exception_type, stop_after_attempt,
 from ..config import get_settings
 
 
+# Chains an Etherscan free key cannot serve, and a public Blockscout instance
+# that can. Blockscout speaks the same `?module=&action=` dialect, so these are
+# drop-in: same request shapes, same response envelope, no API key, full history
+# instead of the recent-block RPC window.
+BLOCKSCOUT_BASES: dict[int, str] = {
+    8453: "https://base.blockscout.com/api",       # Base
+    10: "https://optimism.blockscout.com/api",     # Optimism
+}
+
+
 class EtherscanError(RuntimeError):
     pass
 
@@ -40,8 +50,11 @@ class Etherscan:
         self._key = s.etherscan_api_key
         # Tight, explicit timeouts so a single hung upstream can never stall a
         # whole tool call past the platform's task budget. connect fast, read short.
+        # follow_redirects: some Blockscout instances answer with a 301 to their
+        # canonical host, which would otherwise surface as a hard error.
         self._client = client or httpx.AsyncClient(
-            timeout=httpx.Timeout(9.0, connect=4.0, read=8.0)
+            timeout=httpx.Timeout(9.0, connect=4.0, read=8.0),
+            follow_redirects=True,
         )
         # The documented free-tier ceiling is 5 rps, but the API actually enforces
         # 3/sec ("Max calls per sec rate limit reached (3/sec)"). Two in flight
@@ -59,12 +72,21 @@ class Etherscan:
            retry=retry_if_exception_type(EtherscanRateLimited))
     async def _get(self, params: dict[str, Any]) -> Any:
         chain_id = params.get("chainid")
-        if chain_id in self._unsupported:
-            raise EtherscanUnsupportedChain(
-                f"chain {chain_id} is not available on this Etherscan plan")
-        params = {**params, "apikey": self._key}
-        async with self._sem:
-            r = await self._client.get(self._base, params=params)
+
+        # Route chains the Etherscan plan can't serve to Blockscout. Its
+        # instances are per-chain, so `chainid` is dropped and no key is sent.
+        blockscout = BLOCKSCOUT_BASES.get(chain_id)
+        if blockscout:
+            params = {k: v for k, v in params.items() if k != "chainid"}
+            async with self._sem:
+                r = await self._client.get(blockscout, params=params)
+        else:
+            if chain_id in self._unsupported:
+                raise EtherscanUnsupportedChain(
+                    f"chain {chain_id} is not available on this Etherscan plan")
+            params = {**params, "apikey": self._key}
+            async with self._sem:
+                r = await self._client.get(self._base, params=params)
         r.raise_for_status()
         data = r.json()
         # The `proxy` module answers in raw JSON-RPC shape ({jsonrpc, id, result})
