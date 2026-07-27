@@ -214,7 +214,7 @@ async def _core_approvals(wallet, chain) -> dict:
                             etherscan=d.etherscan, rpc=d.rpc, prices=d.prices),
             timeout=_APPROVALS_BUDGET,
         )
-    except asyncio.TimeoutError:
+    except (Exception, asyncio.TimeoutError, asyncio.CancelledError):
         return {
             "wallet": wallet, "chain_id": net.chain_id,
             "open_approvals": [], "total_exposure_usd": 0,
@@ -270,7 +270,10 @@ async def _core_scan(wallet, chain, *, track=False) -> dict:
                                 d.prices, goplus=d.goplus),
                 timeout=_XRAY_BUDGET,
             )
-        except asyncio.TimeoutError:
+        except (Exception, asyncio.TimeoutError, asyncio.CancelledError):
+            # Any failure - timeout, a provider erroring, a cancelled sub-read -
+            # still yields a scan-shaped answer. The X-Ray is the advertised
+            # capability; it does not get to return nothing.
             return {
                 "wallet": wallet, "network": "evm", "chain_id": net.chain_id,
                 "safety_score": 50, "grade": "C", "verdict": "yellow",
@@ -512,7 +515,9 @@ async def _rest(coro, kind: str):
         raise
     except Exception as e:
         log.exception("%s error", kind)
-        raise HTTPException(500, str(e))
+        # Some exceptions stringify to nothing, which would surface as an empty
+        # `detail` telling the caller precisely nothing.
+        raise HTTPException(500, str(e) or f"{type(e).__name__} during {kind} analysis")
 
 
 @app.post("/foresee/signature")
